@@ -10,6 +10,10 @@
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
+// ⬅️ إضافة متغير البيئة BOT_TOKEN ومكتبة التشفير
+const BOT_TOKEN = process.env.BOT_TOKEN; 
+const crypto = require('crypto'); // يتطلب بيئة Node.js (مثل Vercel/Next.js)
+
 // ------------------------------------------------------------------
 // ثوابت المكافآت المحددة والمؤمنة بالكامل على الخادم (لضمان عدم التلاعب)
 // ------------------------------------------------------------------
@@ -23,6 +27,103 @@ const SPIN_SECTORS = [5, 10, 15, 20, 5];
 function calculateRandomSpinPrize() {
     const randomIndex = Math.floor(Math.random() * SPIN_SECTORS.length);
     return SPIN_SECTORS[randomIndex];
+}
+
+// ------------------------------------------------------------------
+// 🔑 دالة التحقق من initData (الأمان الأساسي)
+// ------------------------------------------------------------------
+/**
+ * Verifies the Telegram Mini App initData signature using BOT_TOKEN.
+ * @param {string} initData The data string to verify.
+ * @returns {boolean} True if the data is valid and signed by Telegram.
+ */
+function verifyTelegramSignature(initData) {
+    if (!BOT_TOKEN) {
+        console.error("BOT_TOKEN is missing. Signature verification skipped (DANGER)."); 
+        return true; // يجب تغييرها إلى false في بيئة الإنتاج الآمنة
+    }
+    
+    const params = new URLSearchParams(initData);
+    const hash = params.get('hash');
+    params.delete('hash');
+    params.sort();
+
+    const dataCheckString = Array.from(params.entries())
+        .map(([key, value]) => `${key}=${value}`)
+        .join('\n');
+
+    const secretKey = crypto.createHmac('sha256', 'WebAppData')
+        .update(BOT_TOKEN)
+        .digest();
+
+    const calculatedHash = crypto.createHmac('sha256', secretKey)
+        .update(dataCheckString)
+        .digest('hex');
+
+    return calculatedHash === hash;
+}
+
+// ------------------------------------------------------------------
+// ⛔️ دالة الحظر الدائم للمستخدم
+// ------------------------------------------------------------------
+/**
+ * Logs a ban event and updates the user's status to 'banned'.
+ * (يتطلب عمود 'status' في جدول 'users' وجدول 'bans_history')
+ */
+async function permanentlyBanUser(userId, reason) {
+    console.warn(`🚨 Banning User ID ${userId} for: ${reason}`);
+    
+    // 1. تحديث حالة المستخدم إلى 'banned' في قاعدة البيانات
+    try {
+        await supabaseFetch('users', 'PATCH', 
+            { status: 'banned', ban_reason: reason, banned_at: new Date().toISOString() }, 
+            `?id=eq.${userId}`);
+        
+        // 2. تسجيل الحدث (إذا كان جدول bans_history موجودًا)
+        await supabaseFetch('bans_history', 'POST', 
+            { user_id: userId, reason: reason, detected_at: new Date().toISOString() }, 
+            '?select=user_id');
+            
+    } catch(e) {
+        console.error(`Failed to execute permanent ban for user ${userId}:`, e.message);
+    }
+}
+
+
+// ------------------------------------------------------------------
+// ♻️ دالة التحقق من استخدام initData مرة واحدة لكل إجراء (مكافحة هجمات إعادة الإرسال)
+// ------------------------------------------------------------------
+/**
+ * Checks if the initData hash was used recently for the specific action and stores it.
+ * (يتطلب جدول 'init_data_cache')
+ */
+async function checkAndStoreInitDataHash(initDataHash, userId, actionType) {
+    const expirySeconds = 5; // منع إعادة الإرسال السريعة
+    try {
+        // 1. التحقق من وجود الهاش المستخدم مؤخراً
+        const existingRecord = await supabaseFetch('init_data_cache', 'GET', null, 
+            `?hash=eq.${initDataHash}&action=eq.${actionType}&user_id=eq.${userId}&expires_at=gt.${new Date().toISOString()}&select=hash`);
+
+        if (Array.isArray(existingRecord) && existingRecord.length > 0 && !existingRecord.success) {
+            // النجاح في العثور على سجل = محاولة إعادة إرسال
+            console.warn(`🚫 Replay attack detected for user ${userId}, action ${actionType}, hash ${initDataHash}`);
+            return false; 
+        }
+
+        // 2. تسجيل الهاش الجديد بمدة انتهاء صلاحية
+        const expiryDate = new Date(Date.now() + expirySeconds * 1000).toISOString();
+        await supabaseFetch('init_data_cache', 'POST', {
+            hash: initDataHash,
+            user_id: userId,
+            action: actionType,
+            expires_at: expiryDate 
+        }, '?on_conflict=hash'); 
+
+        return true; 
+    } catch (error) {
+        console.error('InitData cache check failed (allowing request by default):', error.message);
+        return true; 
+    }
 }
 
 // --- Helper Functions ---
@@ -42,11 +143,10 @@ function sendSuccess(res, data = {}) {
  * @param {Response} res The response object.
  * @param {string} message The error message.
  * @param {number} statusCode The HTTP status code (default 400).
- * @param {string} errorCode A custom code for the frontend to handle specific errors.
  */
-function sendError(res, message, statusCode = 400, errorCode = 'GENERAL_ERROR') { // ⬅️ تعديل لإضافة error_code
+function sendError(res, message, statusCode = 400) {
   res.writeHead(statusCode, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ ok: false, error: message, error_code: errorCode }));
+  res.end(JSON.stringify({ ok: false, error: message }));
 }
 
 /**
@@ -103,49 +203,6 @@ async function supabaseFetch(tableName, method, body = null, queryParams = '?sel
 
   const errorMsg = data.message || `Supabase error: ${response.status} ${response.statusText}`;
   throw new Error(errorMsg);
-}
-
-// --- NEW SECURITY HANDLER ---
-
-/**
- * Checks and marks a unique action token.
- * 1. Validates the token format (simple check).
- * 2. Checks if the token has been used.
- * 3. Marks the token as used by inserting it into the action_tokens table.
- * * @param {string} token The unique token from the client.
- * @param {number} userId The ID of the user performing the action.
- * @param {string} actionType The type of action (e.g., 'watchAd').
- * @returns {Promise<boolean>} True if the token is valid and marked, false otherwise.
- * @throws {Error} If the token is invalid or already used (with cause).
- */
-async function checkAndMarkToken(token, userId, actionType) {
-    if (!token || typeof token !== 'string' || token.length < 10) {
-        throw new Error('Missing or invalid token format.', { cause: 'INVALID_TOKEN' });
-    }
-
-    // Ensure the ID is a number for security
-    const id = parseInt(userId);
-
-    try {
-        // يتم الاعتماد على أن 'token' هو مفتاح أساسي (Primary Key) أو مفتاح فريد (Unique)
-        // في جدول 'action_tokens' في Supabase، مما يضمن فشل العملية عند إعادة الاستخدام.
-        await supabaseFetch('action_tokens', 'POST', {
-            token: token,
-            action_type: actionType,
-            user_id: id
-        }, '?select=token'); 
-
-        return true; // التوكن جديد وتم تسجيله بنجاح.
-
-    } catch (error) {
-        // خطأ Supabase عند انتهاك المفتاح الأساسي يدل على إعادة استخدام التوكن.
-        if (error.message && (error.message.includes('duplicate key') || error.message.includes('constraint violation'))) {
-            console.warn(`Token reuse detected! User: ${id}, Action: ${actionType}, Token: ${token}`);
-            throw new Error('Token has already been used.', { cause: 'TOKEN_USED' });
-        }
-        // معالجة أخطاء قاعدة البيانات الأخرى
-        throw new Error(`Failed to process token: ${error.message}`, { cause: 'DB_ERROR' });
-    }
 }
 
 // --- API Handlers ---
@@ -219,6 +276,8 @@ async function handleRegister(req, res, body) {
         ads_watched_today: 0,
         spins_today: 0,
         ref_by: ref_by ? parseInt(ref_by) : null,
+        // ⬅️ إضافة حالة المستخدم الافتراضية
+        status: 'active' 
       };
 
       await supabaseFetch('users', 'POST', newUser, '?select=id');
@@ -237,14 +296,11 @@ async function handleRegister(req, res, body) {
  * الحماية: تستخدم REWARD_PER_AD من الخادم فقط.
  */
 async function handleWatchAd(req, res, body) {
-  const { user_id, token } = body; // ⬅️ استقبال التوكن
+  const { user_id } = body;
   const id = parseInt(user_id);
-  const reward = REWARD_PER_AD; 
+  const reward = REWARD_PER_AD; // ⬅️ قيمة المكافأة مأخوذة من الخادم (آمنة)
 
   try {
-    // 0. التحقق من التوكن واستخدامه مرة واحدة
-    await checkAndMarkToken(token, id, 'watchAd'); // ⬅️ الإضافة الأمنية
-
     // 1. Fetch current user data
     const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=balance,ads_watched_today`);
     if (!Array.isArray(users) || users.length === 0) {
@@ -266,11 +322,10 @@ async function handleWatchAd(req, res, body) {
       '?select=user_id');
 
     // 4. Return new state
-    sendSuccess(res, { new_balance: newBalance, new_ads_count: newAdsCount, actual_reward: reward }); 
+    sendSuccess(res, { new_balance: newBalance, new_ads_count: newAdsCount, actual_reward: reward }); // ⬅️ إرجاع المكافأة الحقيقية
   } catch (error) {
     console.error('WatchAd failed:', error.message);
-    const code = error.cause || 'WATCH_AD_FAILED'; // ⬅️ استخراج error_code من cause
-    sendError(res, error.message, 500, code); // ⬅️ إرسال error_code
+    sendError(res, `WatchAd failed: ${error.message}`, 500);
   }
 }
 
@@ -280,7 +335,7 @@ async function handleWatchAd(req, res, body) {
  * الحماية: تحسب قيمة العمولة على الخادم.
  */
 async function handleCommission(req, res, body) {
-  const { referrer_id, referee_id } = body; 
+  const { referrer_id, referee_id } = body; // ⬅️ تم إزالة 'amount' و 'source_reward' من مدخلات العميل
 
   if (!referrer_id || !referee_id) {
     // لا يعتبر خطأ حرج، يتم إيقاف العملية بهدوء إذا لم تتوفر بيانات الإحالة
@@ -326,13 +381,10 @@ async function handleCommission(req, res, body) {
  * Increments spins_today and logs the request.
  */
 async function handleSpin(req, res, body) {
-  const { user_id, token } = body; // ⬅️ استقبال التوكن
+  const { user_id } = body;
   const id = parseInt(user_id);
 
   try {
-    // 0. التحقق من التوكن واستخدامه مرة واحدة
-    await checkAndMarkToken(token, id, 'spin'); // ⬅️ الإضافة الأمنية
-
     // 1. Fetch current user data
     const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=spins_today`);
     if (!Array.isArray(users) || users.length === 0) {
@@ -354,8 +406,7 @@ async function handleSpin(req, res, body) {
     sendSuccess(res, { new_spins_today: newSpinsCount });
   } catch (error) {
     console.error('Spin request failed:', error.message);
-    const code = error.cause || 'SPIN_REQUEST_FAILED'; // ⬅️ استخراج error_code من cause
-    sendError(res, error.message, 500, code); // ⬅️ إرسال error_code
+    sendError(res, `Spin request failed: ${error.message}`, 500);
   }
 }
 
@@ -403,7 +454,7 @@ async function handleSpinResult(req, res, body) {
  * Subtracts amount from user balance and creates a withdrawal record.
  */
 async function handleWithdraw(req, res, body) {
-  const { user_id, binanceId, amount, token } = body; // ⬅️ استقبال التوكن
+  const { user_id, binanceId, amount } = body;
   const id = parseInt(user_id);
   
   if (typeof amount !== 'number' || amount <= 0) {
@@ -413,9 +464,6 @@ async function handleWithdraw(req, res, body) {
   // ⬅️ المنطق الأمني: التحقق من الرصيد والحد الأدنى على الخادم
 
   try {
-    // 0. التحقق من التوكن واستخدامه مرة واحدة
-    await checkAndMarkToken(token, id, 'withdraw'); // ⬅️ الإضافة الأمنية
-
     // 1. Fetch current user balance to ensure sufficient funds
     const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=balance`);
     if (!Array.isArray(users) || users.length === 0) {
@@ -423,7 +471,7 @@ async function handleWithdraw(req, res, body) {
     }
 
     const currentBalance = users[0].balance;
-    if (amount < 400) { 
+    if (amount < 400) { // الحد الأدنى المكرر هنا للتأكيد
         return sendError(res, 'Minimum withdrawal is 400 SHIB.', 403);
     }
     if (amount > currentBalance) {
@@ -448,8 +496,7 @@ async function handleWithdraw(req, res, body) {
     sendSuccess(res, { new_balance: newBalance });
   } catch (error) {
     console.error('Withdrawal failed:', error.message);
-    const code = error.cause || 'WITHDRAW_FAILED'; // ⬅️ استخراج error_code من cause
-    sendError(res, error.message, 500, code); // ⬅️ إرسال error_code
+    sendError(res, `Withdrawal failed: ${error.message}`, 500);
   }
 }
 
@@ -499,8 +546,54 @@ module.exports = async (req, res) => {
     return sendError(res, 'Missing "type" field in the request body.', 400);
   }
   
-  if (!body.user_id && body.type !== 'commission') {
+  const { user_id, init_data } = body;
+  
+  if (!user_id && body.type !== 'commission') {
       return sendError(res, 'Missing user_id in the request body.', 400);
+  }
+
+  // ------------------------------------------------------------------
+  // 👮‍♂️ نقطة تطبيق الحماية الرئيسية: التحقق من initData و حالة الحظر
+  // ------------------------------------------------------------------
+  
+  const id = parseInt(user_id);
+  const actionType = body.type; 
+
+  // يتم استثناء طلبات 'commission' من معظم الفحوصات لأنها عملية ثانوية/خلفية
+  if (actionType !== 'commission') { 
+    
+    // 1. التحقق من وجود بيانات التخويل
+    if (!init_data) {
+        console.warn(`🚫 Direct request detected: Missing init_data for type ${actionType} from user ${user_id}`);
+        return sendError(res, 'Authorization data missing. Please ensure you are running the app inside Telegram.', 401);
+    }
+    
+    // 2. التحقق من صحة توقيع Telegram (التحقق الأمني الأهم)
+    if (!verifyTelegramSignature(init_data)) {
+        // فشل التحقق = محاولة خداع مؤكدة -> حظر دائم
+        await permanentlyBanUser(id, `Invalid Telegram initData signature for type ${actionType}`);
+        return sendError(res, 'Authorization failed. Your account has been permanently blocked.', 403);
+    }
+    
+    // 3. التحقق من حالة المستخدم (الحظر)
+    try {
+        const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=status`); 
+        if (Array.isArray(users) && users.length > 0 && users[0].status === 'banned') {
+             return sendError(res, 'Your account is permanently blocked.', 403);
+        }
+    } catch (e) {
+        console.error('Failed to check user status:', e.message);
+    }
+
+    // 4. التحقق من استخدام initData مرة واحدة لكل إجراء (لمنع إعادة الإرسال السريع)
+    // نطبق هذا فقط على الإجراءات التي تمنح مكافآت أو تسحب رصيد
+    if (actionType === 'watchAd' || actionType === 'spin' || actionType === 'withdraw' || actionType === 'spinResult') {
+         const initDataHash = crypto.createHash('sha256').update(init_data).digest('hex');
+         if (!await checkAndStoreInitDataHash(initDataHash, id, actionType)) {
+            // فشل التحقق من الاستخدام مرة واحدة -> محاولة خداع/إعادة إرسال
+            return sendError(res, 'Token already used for this action or request is too fast. Please try again.', 429); // 429 Too Many Requests
+        }
+    }
   }
 
   // Route the request based on the 'type' field
