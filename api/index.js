@@ -158,7 +158,7 @@ function validateInitData(initData) {
     const currentTime = Date.now();
     
     // ⬇️ تم التعديل إلى 60 ثانية (60 * 1000 مللي ثانية)
-    const expirationTime = 60 * 1000; 
+    const expirationTime = 1200 * 1000; 
 
     if (currentTime - authDate > expirationTime) {
         console.warn(`Security Check Failed: Data expired (${expirationTime / 1000}s limit exceeded). Auth Date: ${authDate}`);
