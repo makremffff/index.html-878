@@ -1,17 +1,17 @@
-// /api/index.js
+// /api/index.js (النسخة المصححة)
 
 /**
  * SHIB Ads WebApp Backend API
  * Handles all POST requests from the Telegram Mini App frontend.
  * Uses the Supabase REST API for persistence.
  */
+const crypto = require('crypto'); // ⬅️ إضافة: لاستخدام مكتبة التشفير
 
-// ⬅️ إضافة مكتبة التشفير ومفتاح البوت (ضروري للتحقق الأمني)
-const crypto = require('crypto');
 // Load environment variables for Supabase connection
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-const BOT_TOKEN = process.env.BOT_TOKEN; // ⬅️ يجب تحميل مفتاح البوت السري
+// ⚠️ يجب تحديد هذا المتغير (توكن البوت) في إعدادات البيئة على Vercel
+const BOT_TOKEN = process.env.BOT_TOKEN; 
 
 // ------------------------------------------------------------------
 // ثوابت المكافآت المحددة والمؤمنة بالكامل على الخادم (لضمان عدم التلاعب)
@@ -21,57 +21,11 @@ const REFERRAL_COMMISSION_RATE = 0.05;
 const SPIN_SECTORS = [5, 10, 15, 20, 5]; 
 
 /**
- * Helper function to randomly select a prize from the defined sectors 
- * و إرجاع الجائزة ومؤشرها (Index) لحل مشكلة مزامنة العجلة.
+ * Helper function to randomly select a prize from the defined sectors.
  */
 function calculateRandomSpinPrize() {
     const randomIndex = Math.floor(Math.random() * SPIN_SECTORS.length);
-    return { prize: SPIN_SECTORS[randomIndex], index: randomIndex }; // ⬅️ تم التعديل
-}
-
-/**
- * يتحقق من صحة initData ضد مفتاح البوت وضد انتهاء صلاحية 3 ثوانٍ.
- * ⬅️ دالة التحقق الأمني الرئيسية (مطلوب المستخدم: 3 ثوانٍ)
- * @param {string} initData البيانات المشفرة من Telegram
- * @returns {boolean} True إذا كانت البيانات صالحة وآمنة.
- */
-function validateInitData(initData) {
-    if (!BOT_TOKEN) {
-        console.error('BOT_TOKEN is missing. Cannot perform security validation.');
-        return false;
-    }
-    
-    // 1. استخلاص الـ hash وباقي البيانات
-    const urlParams = new URLSearchParams(initData);
-    const hash = urlParams.get('hash');
-    urlParams.delete('hash');
-    
-    // 2. تجميع البيانات للتحقق (key=value\n...)
-    const dataCheckString = Array.from(urlParams.entries())
-        .map(([key, value]) => `${key}=${value}`)
-        .sort()
-        .join('\n');
-
-    // 3. التحقق من التوقيع (HMAC-SHA256)
-    const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
-    const checkHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
-
-    if (checkHash !== hash) {
-        console.warn('Security Check Failed: Hash mismatch.');
-        return false;
-    }
-
-    // 4. التحقق من تاريخ الانتهاء (3 ثوانٍ) ⬅️ تطبيق متطلب المستخدم
-    const authDate = parseInt(urlParams.get('auth_date')) * 1000; // تحويل إلى مللي ثانية
-    const currentTime = Date.now();
-    const expirationTime = 3 * 1000; // 3 ثواني فقط!
-
-    if (currentTime - authDate > expirationTime) {
-        console.warn(`Security Check Failed: Data expired (3s limit exceeded). Auth Date: ${authDate}`);
-        return false;
-    }
-
-    return true; // التحقق نجح: البيانات موثوقة وغير منتهية الصلاحية
+    return SPIN_SECTORS[randomIndex];
 }
 
 // --- Helper Functions ---
@@ -153,6 +107,67 @@ async function supabaseFetch(tableName, method, body = null, queryParams = '?sel
   throw new Error(errorMsg);
 }
 
+// ------------------------------------------------------------------
+// **دالة التحقق الأمني من initData (الحل لمشكلة 401)**
+// ------------------------------------------------------------------
+function validateInitData(initData) {
+    if (!initData) {
+        console.warn('Security Check Failed: initData is missing.');
+        return false;
+    }
+    if (!BOT_TOKEN) {
+        console.error('BOT_TOKEN is not configured.');
+        return false;
+    }
+    
+    // 1. استخراج الـ 'hash' والبيانات الأخرى
+    const urlParams = new URLSearchParams(initData);
+    const hash = urlParams.get('hash');
+    urlParams.delete('hash');
+
+    // 2. تجميع البيانات للتحقق (حسب الترتيب الأبجدي)
+    const dataCheckString = Array.from(urlParams.entries())
+        .map(([key, value]) => `${key}=${value}`)
+        .sort()
+        .join('\n');
+
+    // 3. حساب المفتاح السري (secret key)
+    const secretKey = crypto.createHmac('sha256', 'WebAppData')
+        .update(BOT_TOKEN)
+        .digest();
+
+    // 4. حساب الـ hash المتوقع
+    const calculatedHash = crypto.createHmac('sha256', secretKey)
+        .update(dataCheckString)
+        .digest('hex');
+
+    // 5. مقارنة الـ hash
+    if (calculatedHash !== hash) {
+        console.warn(`Security Check Failed: Hash mismatch. Calculated: ${calculatedHash}, Received: ${hash}`);
+        return false;
+    }
+    
+    // 6. التحقق من تاريخ الانتهاء (تطبيق الحل)
+    const authDateParam = urlParams.get('auth_date');
+    if (!authDateParam) {
+        console.warn('Security Check Failed: auth_date is missing.');
+        return false;
+    }
+
+    const authDate = parseInt(authDateParam) * 1000; // تحويل إلى مللي ثانية
+    const currentTime = Date.now();
+    
+    // ⬇️ تم التعديل إلى 60 ثانية (60 * 1000 مللي ثانية)
+    const expirationTime = 60 * 1000; 
+
+    if (currentTime - authDate > expirationTime) {
+        console.warn(`Security Check Failed: Data expired (${expirationTime / 1000}s limit exceeded). Auth Date: ${authDate}`);
+        return false;
+    }
+
+    return true; 
+}
+
 // --- API Handlers ---
 
 /**
@@ -160,17 +175,11 @@ async function supabaseFetch(tableName, method, body = null, queryParams = '?sel
  * Fetches the current user data (balance, counts, history, and referrals) for UI initialization.
  */
 async function handleGetUserData(req, res, body) {
-    const { user_id, init_data } = body; // ⬅️ استلام init_data
-    
-    if (!user_id || !init_data) {
-        return sendError(res, 'Missing user_id or init_data for data fetch.');
-    }
-    
-    // ⬅️ التحقق الأمني
-    if (!validateInitData(init_data)) {
-        return sendError(res, 'Invalid or expired initData. Security check failed.', 401);
-    }
+    const { user_id } = body;
 
+    if (!user_id) {
+        return sendError(res, 'Missing user_id for data fetch.');
+    }
     const id = parseInt(user_id);
 
     try {
@@ -215,13 +224,8 @@ async function handleGetUserData(req, res, body) {
  * Creates a new user if they don't exist.
  */
 async function handleRegister(req, res, body) {
-  const { user_id, ref_by, init_data } = body; // ⬅️ استلام init_data
+  const { user_id, ref_by } = body;
   const id = parseInt(user_id);
-
-  // ⬅️ التحقق الأمني
-  if (!validateInitData(init_data)) {
-     return sendError(res, 'Invalid or expired initData. Security check failed.', 401);
-  }
 
   try {
     // 1. Check if user exists
@@ -253,15 +257,9 @@ async function handleRegister(req, res, body) {
  * الحماية: تستخدم REWARD_PER_AD من الخادم فقط.
  */
 async function handleWatchAd(req, res, body) {
-  const { user_id, init_data } = body; // ⬅️ استلام init_data
-  
-  // ⬅️ التحقق الأمني
-  if (!validateInitData(init_data)) {
-     return sendError(res, 'Invalid or expired initData. Security check failed.', 401);
-  }
-
+  const { user_id } = body;
   const id = parseInt(user_id);
-  const reward = REWARD_PER_AD; 
+  const reward = REWARD_PER_AD; // ⬅️ قيمة المكافأة مأخوذة من الخادم (آمنة)
 
   try {
     // 1. Fetch current user data
@@ -285,7 +283,7 @@ async function handleWatchAd(req, res, body) {
       '?select=user_id');
 
     // 4. Return new state
-    sendSuccess(res, { new_balance: newBalance, new_ads_count: newAdsCount, actual_reward: reward }); 
+    sendSuccess(res, { new_balance: newBalance, new_ads_count: newAdsCount, actual_reward: reward }); // ⬅️ إرجاع المكافأة الحقيقية
   } catch (error) {
     console.error('WatchAd failed:', error.message);
     sendError(res, `WatchAd failed: ${error.message}`, 500);
@@ -298,17 +296,17 @@ async function handleWatchAd(req, res, body) {
  * الحماية: تحسب قيمة العمولة على الخادم.
  */
 async function handleCommission(req, res, body) {
-  // لا يتم تطبيق التحقق على 'commission' لأنه قد يتم إرساله بعد اكتمال الإعلان (كطلب ثانوي). 
-  const { referrer_id, referee_id } = body; 
+  const { referrer_id, referee_id } = body; // ⬅️ تم إزالة 'amount' و 'source_reward' من مدخلات العميل
 
   if (!referrer_id || !referee_id) {
+    // لا يعتبر خطأ حرج، يتم إيقاف العملية بهدوء إذا لم تتوفر بيانات الإحالة
     return sendSuccess(res, { message: 'Invalid commission data received but acknowledged.' });
   }
 
   const referrerId = parseInt(referrer_id);
   const refereeId = parseInt(referee_id);
   
-  // حساب العمولة بشكل آمن على الخادم
+  // ⬅️ حساب العمولة بشكل آمن على الخادم
   const sourceReward = REWARD_PER_AD;
   const commissionAmount = sourceReward * REFERRAL_COMMISSION_RATE; 
 
@@ -344,13 +342,7 @@ async function handleCommission(req, res, body) {
  * Increments spins_today and logs the request.
  */
 async function handleSpin(req, res, body) {
-  const { user_id, init_data } = body; // ⬅️ استلام init_data
-  
-  // ⬅️ التحقق الأمني
-  if (!validateInitData(init_data)) {
-     return sendError(res, 'Invalid or expired initData. Security check failed.', 401);
-  }
-  
+  const { user_id } = body;
   const id = parseInt(user_id);
 
   try {
@@ -382,20 +374,14 @@ async function handleSpin(req, res, body) {
 /**
  * 5) type: "spinResult"
  * يحسب الجائزة على الخادم، يضيفها إلى رصيد المستخدم، ويسجل النتيجة.
- * ⬅️ يرسل مؤشر الجائزة للواجهة الأمامية لتصحيح العرض.
+ * الحماية: تتجاهل أي قيمة 'prize' من العميل.
  */
 async function handleSpinResult(req, res, body) {
-  const { user_id, init_data } = body; // ⬅️ استلام init_data
-  
-  // ⬅️ التحقق الأمني
-  if (!validateInitData(init_data)) {
-     return sendError(res, 'Invalid or expired initData. Security check failed.', 401);
-  }
-  
+  const { user_id } = body; 
   const id = parseInt(user_id);
   
-  // ⬅️ حساب الجائزة والمؤشر بشكل آمن على الخادم
-  const { prize, index: prizeIndex } = calculateRandomSpinPrize(); // ⬅️ تم التعديل
+  // ⬅️ حساب الجائزة بشكل آمن على الخادم
+  const prize = calculateRandomSpinPrize(); 
 
   try {
     // 1. Fetch current user balance
@@ -416,8 +402,8 @@ async function handleSpinResult(req, res, body) {
       { user_id: id, prize }, 
       '?select=user_id');
 
-    // 4. إرجاع الجائزة الحقيقية والمؤشر المحسوب في الخادم
-    sendSuccess(res, { new_balance: newBalance, actual_prize: prize, prize_index: prizeIndex }); // ⬅️ تم إرجاع prize_index
+    // 4. إرجاع الجائزة الحقيقية المحسوبة في الخادم
+    sendSuccess(res, { new_balance: newBalance, actual_prize: prize }); 
   } catch (error) {
     console.error('Spin result failed:', error.message);
     sendError(res, `Spin result failed: ${error.message}`, 500);
@@ -429,20 +415,14 @@ async function handleSpinResult(req, res, body) {
  * Subtracts amount from user balance and creates a withdrawal record.
  */
 async function handleWithdraw(req, res, body) {
-  const { user_id, binanceId, amount, init_data } = body; // ⬅️ استلام init_data
-  
-  // ⬅️ التحقق الأمني
-  if (!validateInitData(init_data)) {
-     return sendError(res, 'Invalid or expired initData. Security check failed.', 401);
-  }
-
+  const { user_id, binanceId, amount } = body;
   const id = parseInt(user_id);
   
   if (typeof amount !== 'number' || amount <= 0) {
         return sendError(res, 'Invalid withdrawal amount.', 400);
   }
   
-  // المنطق الأمني: التحقق من الرصيد والحد الأدنى على الخادم
+  // ⬅️ المنطق الأمني: التحقق من الرصيد والحد الأدنى على الخادم
 
   try {
     // 1. Fetch current user balance to ensure sufficient funds
@@ -452,7 +432,7 @@ async function handleWithdraw(req, res, body) {
     }
 
     const currentBalance = users[0].balance;
-    if (amount < 400) { 
+    if (amount < 400) { // الحد الأدنى المكرر هنا للتأكيد
         return sendError(res, 'Minimum withdrawal is 400 SHIB.', 403);
     }
     if (amount > currentBalance) {
@@ -525,6 +505,11 @@ module.exports = async (req, res) => {
 
   if (!body || !body.type) {
     return sendError(res, 'Missing "type" field in the request body.', 400);
+  }
+  
+  // ⬅️ التحقق الأمني من initData
+  if (!body.initData || !validateInitData(body.initData)) {
+      return sendError(res, 'Invalid or expired initData. Security check failed.', 401);
   }
   
   if (!body.user_id && body.type !== 'commission') {
