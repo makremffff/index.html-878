@@ -42,10 +42,11 @@ function sendSuccess(res, data = {}) {
  * @param {Response} res The response object.
  * @param {string} message The error message.
  * @param {number} statusCode The HTTP status code (default 400).
+ * @param {string} errorCode A custom code for the frontend to handle specific errors.
  */
-function sendError(res, message, statusCode = 400) {
+function sendError(res, message, statusCode = 400, errorCode = 'GENERAL_ERROR') { // ⬅️ تعديل لإضافة error_code
   res.writeHead(statusCode, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ ok: false, error: message }));
+  res.end(JSON.stringify({ ok: false, error: message, error_code: errorCode }));
 }
 
 /**
@@ -102,6 +103,49 @@ async function supabaseFetch(tableName, method, body = null, queryParams = '?sel
 
   const errorMsg = data.message || `Supabase error: ${response.status} ${response.statusText}`;
   throw new Error(errorMsg);
+}
+
+// --- NEW SECURITY HANDLER ---
+
+/**
+ * Checks and marks a unique action token.
+ * 1. Validates the token format (simple check).
+ * 2. Checks if the token has been used.
+ * 3. Marks the token as used by inserting it into the action_tokens table.
+ * * @param {string} token The unique token from the client.
+ * @param {number} userId The ID of the user performing the action.
+ * @param {string} actionType The type of action (e.g., 'watchAd').
+ * @returns {Promise<boolean>} True if the token is valid and marked, false otherwise.
+ * @throws {Error} If the token is invalid or already used (with cause).
+ */
+async function checkAndMarkToken(token, userId, actionType) {
+    if (!token || typeof token !== 'string' || token.length < 10) {
+        throw new Error('Missing or invalid token format.', { cause: 'INVALID_TOKEN' });
+    }
+
+    // Ensure the ID is a number for security
+    const id = parseInt(userId);
+
+    try {
+        // يتم الاعتماد على أن 'token' هو مفتاح أساسي (Primary Key) أو مفتاح فريد (Unique)
+        // في جدول 'action_tokens' في Supabase، مما يضمن فشل العملية عند إعادة الاستخدام.
+        await supabaseFetch('action_tokens', 'POST', {
+            token: token,
+            action_type: actionType,
+            user_id: id
+        }, '?select=token'); 
+
+        return true; // التوكن جديد وتم تسجيله بنجاح.
+
+    } catch (error) {
+        // خطأ Supabase عند انتهاك المفتاح الأساسي يدل على إعادة استخدام التوكن.
+        if (error.message && (error.message.includes('duplicate key') || error.message.includes('constraint violation'))) {
+            console.warn(`Token reuse detected! User: ${id}, Action: ${actionType}, Token: ${token}`);
+            throw new Error('Token has already been used.', { cause: 'TOKEN_USED' });
+        }
+        // معالجة أخطاء قاعدة البيانات الأخرى
+        throw new Error(`Failed to process token: ${error.message}`, { cause: 'DB_ERROR' });
+    }
 }
 
 // --- API Handlers ---
@@ -193,11 +237,14 @@ async function handleRegister(req, res, body) {
  * الحماية: تستخدم REWARD_PER_AD من الخادم فقط.
  */
 async function handleWatchAd(req, res, body) {
-  const { user_id } = body;
+  const { user_id, token } = body; // ⬅️ استقبال التوكن
   const id = parseInt(user_id);
-  const reward = REWARD_PER_AD; // ⬅️ قيمة المكافأة مأخوذة من الخادم (آمنة)
+  const reward = REWARD_PER_AD; 
 
   try {
+    // 0. التحقق من التوكن واستخدامه مرة واحدة
+    await checkAndMarkToken(token, id, 'watchAd'); // ⬅️ الإضافة الأمنية
+
     // 1. Fetch current user data
     const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=balance,ads_watched_today`);
     if (!Array.isArray(users) || users.length === 0) {
@@ -219,10 +266,11 @@ async function handleWatchAd(req, res, body) {
       '?select=user_id');
 
     // 4. Return new state
-    sendSuccess(res, { new_balance: newBalance, new_ads_count: newAdsCount, actual_reward: reward }); // ⬅️ إرجاع المكافأة الحقيقية
+    sendSuccess(res, { new_balance: newBalance, new_ads_count: newAdsCount, actual_reward: reward }); 
   } catch (error) {
     console.error('WatchAd failed:', error.message);
-    sendError(res, `WatchAd failed: ${error.message}`, 500);
+    const code = error.cause || 'WATCH_AD_FAILED'; // ⬅️ استخراج error_code من cause
+    sendError(res, error.message, 500, code); // ⬅️ إرسال error_code
   }
 }
 
@@ -232,7 +280,7 @@ async function handleWatchAd(req, res, body) {
  * الحماية: تحسب قيمة العمولة على الخادم.
  */
 async function handleCommission(req, res, body) {
-  const { referrer_id, referee_id } = body; // ⬅️ تم إزالة 'amount' و 'source_reward' من مدخلات العميل
+  const { referrer_id, referee_id } = body; 
 
   if (!referrer_id || !referee_id) {
     // لا يعتبر خطأ حرج، يتم إيقاف العملية بهدوء إذا لم تتوفر بيانات الإحالة
@@ -278,10 +326,13 @@ async function handleCommission(req, res, body) {
  * Increments spins_today and logs the request.
  */
 async function handleSpin(req, res, body) {
-  const { user_id } = body;
+  const { user_id, token } = body; // ⬅️ استقبال التوكن
   const id = parseInt(user_id);
 
   try {
+    // 0. التحقق من التوكن واستخدامه مرة واحدة
+    await checkAndMarkToken(token, id, 'spin'); // ⬅️ الإضافة الأمنية
+
     // 1. Fetch current user data
     const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=spins_today`);
     if (!Array.isArray(users) || users.length === 0) {
@@ -303,7 +354,8 @@ async function handleSpin(req, res, body) {
     sendSuccess(res, { new_spins_today: newSpinsCount });
   } catch (error) {
     console.error('Spin request failed:', error.message);
-    sendError(res, `Spin request failed: ${error.message}`, 500);
+    const code = error.cause || 'SPIN_REQUEST_FAILED'; // ⬅️ استخراج error_code من cause
+    sendError(res, error.message, 500, code); // ⬅️ إرسال error_code
   }
 }
 
@@ -351,7 +403,7 @@ async function handleSpinResult(req, res, body) {
  * Subtracts amount from user balance and creates a withdrawal record.
  */
 async function handleWithdraw(req, res, body) {
-  const { user_id, binanceId, amount } = body;
+  const { user_id, binanceId, amount, token } = body; // ⬅️ استقبال التوكن
   const id = parseInt(user_id);
   
   if (typeof amount !== 'number' || amount <= 0) {
@@ -361,6 +413,9 @@ async function handleWithdraw(req, res, body) {
   // ⬅️ المنطق الأمني: التحقق من الرصيد والحد الأدنى على الخادم
 
   try {
+    // 0. التحقق من التوكن واستخدامه مرة واحدة
+    await checkAndMarkToken(token, id, 'withdraw'); // ⬅️ الإضافة الأمنية
+
     // 1. Fetch current user balance to ensure sufficient funds
     const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=balance`);
     if (!Array.isArray(users) || users.length === 0) {
@@ -368,7 +423,7 @@ async function handleWithdraw(req, res, body) {
     }
 
     const currentBalance = users[0].balance;
-    if (amount < 400) { // الحد الأدنى المكرر هنا للتأكيد
+    if (amount < 400) { 
         return sendError(res, 'Minimum withdrawal is 400 SHIB.', 403);
     }
     if (amount > currentBalance) {
@@ -393,7 +448,8 @@ async function handleWithdraw(req, res, body) {
     sendSuccess(res, { new_balance: newBalance });
   } catch (error) {
     console.error('Withdrawal failed:', error.message);
-    sendError(res, `Withdrawal failed: ${error.message}`, 500);
+    const code = error.cause || 'WITHDRAW_FAILED'; // ⬅️ استخراج error_code من cause
+    sendError(res, error.message, 500, code); // ⬅️ إرسال error_code
   }
 }
 
