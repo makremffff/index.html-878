@@ -505,16 +505,8 @@ You will earn 5% of the revenue from every referral you bring through ads!
         let referrerId = getRefParam();
         const API_URL = '/api'; 
 
-        // --- وظيفة جديدة لتوليد توكن فريد (UUID بسيط) ---
-        function generateUniqueToken() {
-            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-                var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
-                return v.toString(16);
-            });
-        }
-        
         // ------------------------------------------------------------------
-        // **دالة fetchApi** (مع التحقق الأمني من دوال Telegram)
+        // **دالة fetchApi** (تعديل لإرسال init_data للتحقق من الأمان)
         // ------------------------------------------------------------------
         async function fetchApi(payload) {
             if (!tgUser) {
@@ -522,27 +514,30 @@ You will earn 5% of the revenue from every referral you bring through ads!
                 return { ok: false, error: 'User not initialized' };
             }
 
+            // ⬅️ جلب initData لجميع الطلبات
+            const initData = Telegram.WebApp.initData; 
+            if (!initData) {
+                Telegram.WebApp.showAlert('❌ Telegram Init Data missing. Cannot proceed.');
+                return { ok: false, error: 'Init Data missing' };
+            }
+            // ------------------------------------
+
             if (typeof Telegram.WebApp.showProgress === 'function') {
                 Telegram.WebApp.showProgress();
             }
             
-            // ⬅️ إضافة التوكن إلى حمولة البيانات إذا كان الإجراء محمياً
-            const finalPayload = {
-                ...payload,
-                user_id: tgUser.id
-            };
-            // الإجراءات المحمية بالتوكن هي: watchAd, spin, withdraw
-            if(['watchAd', 'spin', 'withdraw'].includes(payload.type) && !payload.token) {
-                 finalPayload.token = generateUniqueToken(); 
-            }
-
             try {
                 const response = await fetch(API_URL, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify(finalPayload), // ⬅️ استخدام الحمولة النهائية
+                    body: JSON.stringify({
+                        ...payload,
+                        user_id: tgUser.id,
+                        // ⬅️ تمرير init_data للخادم للتحقق الأمني
+                        init_data: initData 
+                    }),
                 });
 
                 if (typeof Telegram.WebApp.hideProgress === 'function') {
@@ -554,15 +549,8 @@ You will earn 5% of the revenue from every referral you bring through ads!
                 if (!response.ok || !data.ok) {
                     const errorMessage = data.error || `Server Error: ${response.status} ${response.statusText}`;
                     console.error(`API Call failed for type ${payload.type}:`, errorMessage);
-                    // ⬅️ رسالة خطأ مخصصة لإساءة الاستخدام
-                    if (data.error_code === 'TOKEN_USED') {
-                        Telegram.WebApp.showAlert('❌ Error: This action has already been processed or the token was reused!');
-                    } else if (data.error_code === 'INVALID_TOKEN') {
-                        Telegram.WebApp.showAlert('❌ Security Error: Missing or invalid action token. Please retry.');
-                    } else {
-                        Telegram.WebApp.showAlert(`❌ API Error (${payload.type}): ${errorMessage}`);
-                    }
-                    return { ok: false, error: errorMessage, error_code: data.error_code }; // ⬅️ إرجاع error_code
+                    Telegram.WebApp.showAlert(`❌ API Error (${payload.type}): ${errorMessage}`);
+                    return { ok: false, error: errorMessage };
                 }
 
                 return data;
@@ -680,9 +668,8 @@ You will earn 5% of the revenue from every referral you bring through ads!
             window.showGiga()
                 .then(async () => {
                     // 1. طلب مكافأة الإعلان من الخادم (بدون إرسال قيمة المكافأة)
-                    // ⬅️ دالة fetchApi ستضيف التوكن
                     const adResult = await fetchApi({
-                        type: 'watchAd' 
+                        type: 'watchAd' // ⬅️ الخادم يحدد المكافأة (3 SHIB)
                     });
 
                     if (adResult.ok) {
@@ -843,7 +830,6 @@ You will earn 5% of the revenue from every referral you bring through ads!
             }
             
             // 1. طلب تسجيل طلب الدوران أولاً
-            // ⬅️ دالة fetchApi ستضيف التوكن
             const spinReqResult = await fetchApi({ type: 'spin' });
 
             if (!spinReqResult.ok) {
@@ -873,9 +859,10 @@ You will earn 5% of the revenue from every referral you bring through ads!
                         
                         // 3. طلب تسجيل نتيجة الدوران وإضافة الجائزة للرصيد (بدون إرسال قيمة الجائزة!)
                         const spinResultPayload = {
-                            type: 'spinResult' // ⬅️ إرسال نوع الطلب فقط، الخادم يحسب الجائزة (هذا الطلب لا يحتاج توكن)
+                            type: 'spinResult' // ⬅️ إرسال نوع الطلب فقط، الخادم يحسب الجائزة
                         };
-                        const spinResultRes = await fetchApi(spinResultPayload);
+                        // يتم هنا استخدام initData جديد للطلب الثاني (spinResult) وسيتم التحقق منه على الخادم
+                        const spinResultRes = await fetchApi(spinResultPayload); 
                         
                         if (spinResultRes.ok) {
                             const finalPrize = spinResultRes.data.actual_prize; // ⬅️ استلام الجائزة الحقيقية من الخادم
@@ -963,11 +950,10 @@ You will earn 5% of the revenue from every referral you bring through ads!
             if(amount > shibBalance){ Telegram.WebApp.showAlert('Insufficient balance. Your current balance is ' + shibBalance.toLocaleString() + ' SHIB.'); return; }
             
             // 1. إرسال طلب السحب عبر API
-            // ⬅️ دالة fetchApi ستضيف التوكن
             const result = await fetchApi({
                 type: 'withdraw',
                 binanceId: binanceId,
-                amount: amount 
+                amount: amount // ⬅️ يتم التحقق من صحة المبلغ والرصيد على الخادم
             });
 
             if (result.ok) {
