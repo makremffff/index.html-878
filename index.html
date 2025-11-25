@@ -6,7 +6,6 @@
     <title>SHIB Ads WebApp</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
-        /* (CSS code remains unchanged - omitted for brevity) */
         @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap');
         @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;700&display=swap'); 
 
@@ -431,7 +430,7 @@ You will earn 5% of the revenue from every referral you bring through ads!
     </div>
     <script src="https://ad.gigapub.tech/script?id=3459"></script>
     <script>
-        /* (Loading screen code remains unchanged) */
+        /* ===== التحميل ===== */
         const progressBar = document.getElementById('progressBar');
         const percentageTxt = document.getElementById('percentage');
         const loadingTxt = document.getElementById('loadingText');
@@ -507,21 +506,13 @@ You will earn 5% of the revenue from every referral you bring through ads!
         const API_URL = '/api'; 
 
         // ------------------------------------------------------------------
-        // **دالة fetchApi** (تعديل لإرسال init_data للتحقق من الأمان)
+        // **دالة fetchApi** (مع التحقق الأمني من دوال Telegram)
         // ------------------------------------------------------------------
         async function fetchApi(payload) {
             if (!tgUser) {
                 Telegram.WebApp.showAlert('❌ User data not initialized. Cannot perform action.');
                 return { ok: false, error: 'User not initialized' };
             }
-
-            // ⬅️ جلب initData لجميع الطلبات
-            const initData = Telegram.WebApp.initData; 
-            if (!initData) {
-                Telegram.WebApp.showAlert('❌ Telegram Init Data missing. Cannot proceed.');
-                return { ok: false, error: 'Init Data missing' };
-            }
-            // ------------------------------------
 
             if (typeof Telegram.WebApp.showProgress === 'function') {
                 Telegram.WebApp.showProgress();
@@ -536,8 +527,7 @@ You will earn 5% of the revenue from every referral you bring through ads!
                     body: JSON.stringify({
                         ...payload,
                         user_id: tgUser.id,
-                        // ⬅️ تمرير init_data للخادم للتحقق الأمني
-                        init_data: initData 
+                        init_data: Telegram.WebApp.initData // ⬅️ إضافة initData هنا للتحقق الأمني
                     }),
                 });
 
@@ -565,9 +555,11 @@ You will earn 5% of the revenue from every referral you bring through ads!
             }
         }
 
-        /* ===== أنظمة المكافآت والحدود ===== */
+        /* ===== أنظمة المكافآت والحدود وحماية النقرات السريعة (الحدود لا تزال هنا للعرض فقط) ===== */
         const DAILY_MAX = 100;
         const DAILY_MAX_SPINS = 15;
+        // ملاحظة: قيم المكافأة (3 SHIB والعمولة 5%) تمت إزالتها واعتمادها بالكامل على الخادم.
+
         const ADS_CLICK_COOLDOWN  = 1000;
         const SPIN_CLICK_COOLDOWN = 1000; 
 
@@ -577,7 +569,7 @@ You will earn 5% of the revenue from every referral you bring through ads!
         let withdrawalHistory = [];
         let referralsCount = 0; 
         
-        // قائمة القطاعات تبقى هنا لأجل الأنميشن فقط (القيم تستخدم لحساب الزاوية)
+        // قائمة القطاعات تبقى هنا لأجل الأنميشن فقط، والقيمة الفائزة تُحدد على الخادم.
         const sectors = [5, 10, 15, 20, 5]; 
 
         function updateState(data) {
@@ -603,6 +595,7 @@ You will earn 5% of the revenue from every referral you bring through ads!
                     withdrawal_history: (result.data.withdrawal_history || []).map(item => ({
                         amount: item.amount,
                         status: item.status,
+                        // استخدام toLocaleDateString بضبط إقليمي يضمن تنسيقًا مقبولاً
                         date: new Date(item.created_at).toLocaleDateString('en-GB') 
                     }))
                 });
@@ -658,7 +651,6 @@ You will earn 5% of the revenue from every referral you bring through ads!
             }
             sessionStorage.setItem('lastAdClickTime', now);
             
-            // ⬅️ التحقق المحلي الأولي (الخادم يقوم بالتحقق الحاسم)
             if(adsWatchedToday >= DAILY_MAX){
                 Telegram.WebApp.showAlert('✅ You have reached the daily limit of 100 ads. Come back tomorrow!');
                 return;
@@ -666,13 +658,13 @@ You will earn 5% of the revenue from every referral you bring through ads!
             
             window.showGiga()
                 .then(async () => {
-                    // 1. طلب مكافأة الإعلان من الخادم 
+                    // 1. طلب مكافأة الإعلان من الخادم (بدون إرسال قيمة المكافأة)
                     const adResult = await fetchApi({
-                        type: 'watchAd' 
+                        type: 'watchAd' // ⬅️ الخادم يحدد المكافأة (3 SHIB)
                     });
 
                     if (adResult.ok) {
-                        const actualReward = adResult.data.actual_reward; 
+                        const actualReward = adResult.data.actual_reward; // ⬅️ استلام المكافأة الفعلية من الخادم
                         
                         // 2. تحديث الواجهة بالقيم الموثوقة من الخادم
                         updateState({
@@ -682,6 +674,8 @@ You will earn 5% of the revenue from every referral you bring through ads!
                         
                         // 3. منطق عمولة الإحالة (يرسل طلب عمولة منفصل)
                         if (referrerId) {
+                            
+                            // ⬅️ نرسل طلب العمولة، الخادم سيحسبها بنفسه
                             fetchApi({
                                 type: 'commission',
                                 referrer_id: referrerId,
@@ -705,7 +699,7 @@ You will earn 5% of the revenue from every referral you bring through ads!
         }
         function circleClick(){ console.log('Circle clicked'); }
 
-        /* ===== دوال شاشة Invite (remain unchanged) ===== */
+        /* ===== دوال شاشة Invite ===== */
         
         function inviteFriends() {
             mainScreen.classList.remove('visible');
@@ -728,6 +722,7 @@ You will earn 5% of the revenue from every referral you bring through ads!
             }
             
             const userId = tgUser.id;
+            // يجب استبدال "Game_win_usdtBot/earn" بـ "اسم_بوتك"
             const botPath = "Game_win_usdtBot/earn"; 
             const inviteLink = `https://t.me/${botPath}?startapp=ref_${userId}`;
             
@@ -753,16 +748,15 @@ You will earn 5% of the revenue from every referral you bring through ads!
         /* ===== نهاية دوال شاشة Invite ===== */
 
 
-        /* ===== Spin Wheel (كود العجلة المحدث) ===== */
+        /* ===== Spin Wheel (كود العجلة) ===== */
         const colors = ['#f73859', '#38e3e7', '#f73859', '#ffd60a', '#38e3e7'];
         const canvas = document.getElementById('wheelCanvas');
         const ctx = canvas.getContext('2d');
         const spinResult = document.getElementById('spinResult');
         let spinning = false;
-        let currentAngle = 0; // الزاوية الحالية لمركز العجلة (بالراديان)
+        let currentAngle = 0;
 
         function drawWheel() {
-            // (Drawing code remains unchanged)
             const centerX = canvas.width / 2;
             const centerY = canvas.height / 2;
             const radius = 130;
@@ -808,27 +802,6 @@ You will earn 5% of the revenue from every referral you bring through ads!
             ctx.stroke();
         }
         drawWheel();
-        
-        /**
-         * يحسب الزاوية المطلوبة لتدوير العجلة بحيث يتوقف المؤشر على منتصف القطاع الفائز.
-         * @param {number} sectorIndex فهرس القطاع الفائز (0-4)
-         * @returns {number} الزاوية النهائية بالراديان
-         */
-        function calculateStopAngle(sectorIndex) {
-            const arc = 2 * Math.PI / sectors.length;
-            const centerOfSector = sectorIndex * arc + arc / 2;
-            
-            // نطرح الزاوية ليصبح مركز القطاع الفائز تحت السهم (الذي يشير إلى 90 درجة أو PI/2)
-            // نأخذ في الاعتبار أن العجلة تبدأ من 0 (على اليمين) والمؤشر في الأعلى (PI/2)
-            let rotationToStop = 2 * Math.PI - centerOfSector + Math.PI / 2; 
-            
-            // إضافة دورات إضافية لجعل الدوران واضحاً (5 دورات)
-            const extraSpins = 5; 
-            const totalRotation = rotationToStop + extraSpins * 2 * Math.PI;
-            
-            return totalRotation;
-        }
-
 
         async function startSpin(){
             if(spinning) return;
@@ -847,62 +820,86 @@ You will earn 5% of the revenue from every referral you bring through ads!
                 return;
             }
             
-            // 1. استدعاء GigaPub
+            // 1. طلب تسجيل طلب الدوران أولاً
+            const spinReqResult = await fetchApi({ type: 'spin' });
+
+            if (!spinReqResult.ok) {
+                return; 
+            }
+            
+            // تحديث عدد الدورات بالعدد الموثوق من الخادم (في حالة النجاح)
+            updateState({ spins_today: spinReqResult.data.new_spins_today });
+
+            // 2. استدعاء GigaPub
             window.showGiga()
                 .then(async () => {
                     spinning = true;
                     spinBtn.disabled = true;
-                    spinResult.textContent = 'Spinning...';
+                    spinResult.textContent = '';
                     
-                    // 2. طلب الجائزة وتحديث الحالة في طلب واحد آمن
-                    const spinResultRes = await fetchApi({
-                        type: 'spinAndGetPrize' // ⬅️ طلب موحد
-                    }); 
+                    // 3. طلب تسجيل نتيجة الدوران وإضافة الجائزة للرصيد
+                    const spinResultPayload = {
+                        type: 'spinResult' // ⬅️ الخادم يحسب الجائزة والمؤشر
+                    };
+                    const spinResultRes = await fetchApi(spinResultPayload);
                     
-                    if (!spinResultRes.ok) {
-                        spinning = false;
-                        spinBtn.disabled = false;
-                        spinResult.textContent = `❌ Error: ${spinResultRes.error}`;
-                        loadUserData(); // إعادة تحميل البيانات لتصحيح العداد
-                        return;
+                    if (spinResultRes.ok) {
+                        const finalPrize = spinResultRes.data.actual_prize; 
+                        const prizeIndex = spinResultRes.data.prize_index; // ⬅️ استلام مؤشر الجائزة من الخادم
+                        
+                        // ⬅️ منطق حساب الزاوية بناءً على المؤشر المستلم (تصحيح المزامنة)
+                        
+                        const sectorCount = sectors.length; 
+                        const arc = 2 * Math.PI / sectorCount; 
+                        
+                        // زاوية مركز القطاع المستهدف 
+                        const targetAngle = prizeIndex * arc + (arc / 2);
+                        
+                        // زاوية السهم (العلامة) تكون عند 270 درجة (1.5 * PI)
+                        const arrowAngle = 1.5 * Math.PI; 
+                        
+                        let rotationToApply = arrowAngle - targetAngle;
+                        
+                        while (rotationToApply < 0) {
+                            rotationToApply += 2 * Math.PI;
+                        }
+                        
+                        // إضافة دورات كاملة لعمل الحركة (5 دورات كاملة + الزاوية المطلوبة)
+                        rotationToApply = rotationToApply + (5 * 2 * Math.PI); 
+                        currentAngle += rotationToApply;
+
+                        canvas.style.transition = 'transform 4s cubic-bezier(0.22,0,0.2,1)';
+                        canvas.style.transform = `rotate(${currentAngle}rad)`;
+                        
+                        setTimeout(async ()=>{
+                            canvas.style.transition = 'none'; 
+                            
+                            // 4. تحديث الرصيد بالرصيد الموثوق من الخادم
+                            updateState({ balance: spinResultRes.data.new_balance });
+                            spinResult.textContent = `🎉 You won ${finalPrize} SHIB!`;
+                            
+                            // ⚡️ إعادة تحميل كامل لبيانات المستخدم للتأكد من مزامنة جميع العدادات
+                            await loadUserData(); 
+                            
+                        },4000); // 4000ms is the transition time
+
+                    } else {
+                        // في حالة فشل طلب النتيجة، يجب إعادة تحميل البيانات لتصحيح العداد إذا لزم الأمر
+                        spinResult.textContent = `❌ Error receiving prize. Please check logs.`;
+                        await loadUserData(); 
                     }
                     
-                    const finalPrize = spinResultRes.data.actual_prize;
-                    const sectorIndex = spinResultRes.data.sector_index; // ⬅️ الفهرس الدقيق للقطاع الفائز
-                    
-                    // 3. حساب الزاوية بناءً على الفهرس الفائز (للتوقف بدقة)
-                    const totalAngle = calculateStopAngle(sectorIndex);
-                    currentAngle += totalAngle;
-                    
-                    // 4. بدء الأنميشن (تم تقليل المدة إلى 3 ثوانٍ)
-                    const DURATION = 3000; // ⬅️ تم تقليل المدة
-                    canvas.style.transition = `transform ${DURATION / 1000}s cubic-bezier(0.22,0,0.2,1)`;
-                    canvas.style.transform = `rotate(${currentAngle}rad)`;
-                    
-                    setTimeout(async ()=>{
-                        canvas.style.transition = 'none'; 
-                        
-                        // 5. تحديث الرصيد بالرصيد الموثوق من الخادم
-                        updateState({ 
-                            balance: spinResultRes.data.new_balance,
-                            spins_today: spinResultRes.data.new_spins_today
-                        });
-                        
-                        spinResult.textContent = `🎉 You won ${finalPrize} SHIB!`;
-                        
-                        spinning   = false;
-                        updateUI(); 
-                    }, DURATION);
-
+                    spinning   = false;
+                    updateUI(); 
                 })
                 .catch(e => {
                     console.error("GigaPub Ad failed to show or was dismissed:", e);
                     Telegram.WebApp.showAlert('❌ Failed to load ad. Spin was not counted. Please try again.');
-                    loadUserData(); 
+                    loadUserData(); // إعادة تحميل البيانات لتصحيح العداد
                 });
         }
 
-        /* ===== Navigation and Withdraw (remain unchanged) ===== */
+        /* ===== Navigation and Withdraw ===== */
         function showSpin(){
             mainScreen.classList.remove('visible');
             document.getElementById('spinScreen').classList.add('visible');
@@ -956,22 +953,27 @@ You will earn 5% of the revenue from every referral you bring through ads!
             const binanceId = document.getElementById('binanceId').value.trim();
             const amount = parseInt(document.getElementById('withdrawAmount').value);
             
+            // ⬅️ لا يزال التحقق المحلي موجودًا لتجربة المستخدم، لكن التحقق الحاسم يحدث على الخادم
             if(!binanceId || binanceId.length < 8){ Telegram.WebApp.showAlert('Please enter a valid Binance User ID (min 8 digits).'); return; }
             if(isNaN(amount) || amount < 400){ Telegram.WebApp.showAlert('Minimum withdrawal is 400 SHIB.'); return; }
             if(amount > shibBalance){ Telegram.WebApp.showAlert('Insufficient balance. Your current balance is ' + shibBalance.toLocaleString() + ' SHIB.'); return; }
             
+            // 1. إرسال طلب السحب عبر API
             const result = await fetchApi({
                 type: 'withdraw',
                 binanceId: binanceId,
-                amount: amount 
+                amount: amount // ⬅️ يتم التحقق من صحة المبلغ والرصيد على الخادم
             });
 
             if (result.ok) {
+                // 2. تحديث الرصيد بالرصيد الموثوق من الخادم
                 updateState({ balance: result.data.new_balance });
+                
+                // 3. إعادة تحميل سجل السحوبات بالبيانات الجديدة
                 await loadUserData(); 
                 displayWithdrawals(); 
                 
-                Telegram.WebApp.showAlert('✅ Withdrawal request sent successfully!\\n\\nBinance ID: '+binanceId+'\\nAmount: '+amount.toLocaleString()+' SHIB\\n\\nThe amount will be transferred to your account within 24 hours.');
+                Telegram.WebApp.showAlert('✅ Withdrawal request sent successfully!\n\nBinance ID: '+binanceId+'\nAmount: '+amount.toLocaleString()+' SHIB\n\nThe amount will be transferred to your account within 24 hours.');
             }
         }
     </script>
