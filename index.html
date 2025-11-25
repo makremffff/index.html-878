@@ -214,6 +214,7 @@
             background:linear-gradient(145deg, #28a745, #1e7e34);
             color:#fff;border:none;padding:12px 30px;border-radius:10px;font-size:16px;font-weight:bold;cursor:pointer;
             box-shadow:0 5px 0 #1c6d32;transition:all .1s ease;
+            width: 100%;
         }
         .withdraw-btn:active{transform:translateY(3px);box-shadow:0 2px 0 #1c6d32}
         .back-btn{
@@ -506,12 +507,19 @@ You will earn 5% of the revenue from every referral you bring through ads!
         const API_URL = '/api'; 
 
         // ------------------------------------------------------------------
-        // **دالة fetchApi** (مع التحقق الأمني من دوال Telegram)
+        // **دالة fetchApi** (مع تصحيح الأمان: إرسال initData)
         // ------------------------------------------------------------------
         async function fetchApi(payload) {
             if (!tgUser) {
                 Telegram.WebApp.showAlert('❌ User data not initialized. Cannot perform action.');
                 return { ok: false, error: 'User not initialized' };
+            }
+
+            // ⬅️ الإضافة: يجب إرسال initData للتحقق الأمني في الخادم
+            const initData = Telegram.WebApp.initData;
+            if (!initData) {
+                Telegram.WebApp.showAlert('❌ Telegram initialization data is missing. Cannot proceed.');
+                return { ok: false, error: 'InitData missing' };
             }
 
             if (typeof Telegram.WebApp.showProgress === 'function') {
@@ -527,7 +535,7 @@ You will earn 5% of the revenue from every referral you bring through ads!
                     body: JSON.stringify({
                         ...payload,
                         user_id: tgUser.id,
-                        init_data: Telegram.WebApp.initData // ⬅️ إضافة initData هنا للتحقق الأمني
+                        initData: initData // ⬅️ إضافة initData إلى الجسم
                     }),
                 });
 
@@ -558,7 +566,6 @@ You will earn 5% of the revenue from every referral you bring through ads!
         /* ===== أنظمة المكافآت والحدود وحماية النقرات السريعة (الحدود لا تزال هنا للعرض فقط) ===== */
         const DAILY_MAX = 100;
         const DAILY_MAX_SPINS = 15;
-        // ملاحظة: قيم المكافأة (3 SHIB والعمولة 5%) تمت إزالتها واعتمادها بالكامل على الخادم.
 
         const ADS_CLICK_COOLDOWN  = 1000;
         const SPIN_CLICK_COOLDOWN = 1000; 
@@ -584,6 +591,7 @@ You will earn 5% of the revenue from every referral you bring through ads!
         async function loadUserData() {
             if (!tgUser) return;
             
+            // ⬅️ إزالة init_data من البايلود هنا لأنه سيتم إضافته في دالة fetchApi
             const result = await fetchApi({ type: 'getUserData' });
 
             if (result.ok) {
@@ -722,7 +730,7 @@ You will earn 5% of the revenue from every referral you bring through ads!
             }
             
             const userId = tgUser.id;
-            // يجب استبدال "Game_win_usdtBot/earn" بـ "اسم_بوتك"
+            // ⚠️ يجب استبدال "Game_win_usdtBot/earn" بـ "اسم_بوتك" الفعلي
             const botPath = "Game_win_usdtBot/earn"; 
             const inviteLink = `https://t.me/${botPath}?startapp=ref_${userId}`;
             
@@ -845,7 +853,8 @@ You will earn 5% of the revenue from every referral you bring through ads!
                     
                     if (spinResultRes.ok) {
                         const finalPrize = spinResultRes.data.actual_prize; 
-                        const prizeIndex = spinResultRes.data.prize_index; // ⬅️ استلام مؤشر الجائزة من الخادم
+                        // ⚠️ هنا نفترض أن الخادم يرجع prize_index لتصحيح العجلة
+                        const prizeIndex = spinResultRes.data.prize_index !== undefined ? spinResultRes.data.prize_index : 0; 
                         
                         // ⬅️ منطق حساب الزاوية بناءً على المؤشر المستلم (تصحيح المزامنة)
                         
@@ -853,6 +862,7 @@ You will earn 5% of the revenue from every referral you bring through ads!
                         const arc = 2 * Math.PI / sectorCount; 
                         
                         // زاوية مركز القطاع المستهدف 
+                        // (الترتيب في المصفوفة يبدأ من القطاع العلوي في حال كانت زاوية البداية 1.5 * PI)
                         const targetAngle = prizeIndex * arc + (arc / 2);
                         
                         // زاوية السهم (العلامة) تكون عند 270 درجة (1.5 * PI)
@@ -860,6 +870,7 @@ You will earn 5% of the revenue from every referral you bring through ads!
                         
                         let rotationToApply = arrowAngle - targetAngle;
                         
+                        // لضمان دوران العجلة في الاتجاه الموجب (مع عقارب الساعة)
                         while (rotationToApply < 0) {
                             rotationToApply += 2 * Math.PI;
                         }
