@@ -6,131 +6,80 @@
  * Uses the Supabase REST API for persistence.
  */
 
+// ⬅️ إضافة مكتبة التشفير ومفتاح البوت (ضروري للتحقق الأمني)
+const crypto = require('crypto');
 // Load environment variables for Supabase connection
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-// ⬅️ إضافة متغير البيئة BOT_TOKEN ومكتبة التشفير
-const BOT_TOKEN = process.env.BOT_TOKEN; 
-const crypto = require('crypto'); // يتطلب بيئة Node.js (مثل Vercel/Next.js)
+const BOT_TOKEN = process.env.BOT_TOKEN; // ⬅️ يجب تحميل مفتاح البوت السري
 
 // ------------------------------------------------------------------
 // ثوابت المكافآت المحددة والمؤمنة بالكامل على الخادم (لضمان عدم التلاعب)
 // ------------------------------------------------------------------
 const REWARD_PER_AD = 3; 
-const DAILY_MAX_ADS = 100; // ⬅️ الحد الأقصى اليومي للإعلانات (مضاف هنا)
-const DAILY_MAX_SPINS = 15; // ⬅️ الحد الأقصى اليومي للدورات
 const REFERRAL_COMMISSION_RATE = 0.05;
 const SPIN_SECTORS = [5, 10, 15, 20, 5]; 
 
 /**
- * Helper function to randomly select a prize from the defined sectors.
- * @returns {{prize: number, sectorIndex: number}}
+ * Helper function to randomly select a prize from the defined sectors 
+ * و إرجاع الجائزة ومؤشرها (Index) لحل مشكلة مزامنة العجلة.
  */
 function calculateRandomSpinPrize() {
     const randomIndex = Math.floor(Math.random() * SPIN_SECTORS.length);
-    return {
-        prize: SPIN_SECTORS[randomIndex],
-        sectorIndex: randomIndex
-    };
+    return { prize: SPIN_SECTORS[randomIndex], index: randomIndex }; // ⬅️ تم التعديل
 }
 
-// ------------------------------------------------------------------
-// 🔑 دالة التحقق من initData (الأمان الأساسي)
-// ------------------------------------------------------------------
 /**
- * Verifies the Telegram Mini App initData signature using BOT_TOKEN.
- * @param {string} initData The data string to verify.
- * @returns {boolean} True if the data is valid and signed by Telegram.
+ * يتحقق من صحة initData ضد مفتاح البوت وضد انتهاء صلاحية 3 ثوانٍ.
+ * ⬅️ دالة التحقق الأمني الرئيسية (مطلوب المستخدم: 3 ثوانٍ)
+ * @param {string} initData البيانات المشفرة من Telegram
+ * @returns {boolean} True إذا كانت البيانات صالحة وآمنة.
  */
-function verifyTelegramSignature(initData) {
+function validateInitData(initData) {
     if (!BOT_TOKEN) {
-        console.error("BOT_TOKEN is missing. Signature verification skipped (DANGER)."); 
-        return true; // يجب تغييرها إلى false في بيئة الإنتاج الآمنة
+        console.error('BOT_TOKEN is missing. Cannot perform security validation.');
+        return false;
     }
     
-    const params = new URLSearchParams(initData);
-    const hash = params.get('hash');
-    params.delete('hash');
-    params.sort();
-
-    const dataCheckString = Array.from(params.entries())
+    // 1. استخلاص الـ hash وباقي البيانات
+    const urlParams = new URLSearchParams(initData);
+    const hash = urlParams.get('hash');
+    urlParams.delete('hash');
+    
+    // 2. تجميع البيانات للتحقق (key=value\n...)
+    const dataCheckString = Array.from(urlParams.entries())
         .map(([key, value]) => `${key}=${value}`)
+        .sort()
         .join('\n');
 
-    const secretKey = crypto.createHmac('sha256', 'WebAppData')
-        .update(BOT_TOKEN)
-        .digest();
+    // 3. التحقق من التوقيع (HMAC-SHA256)
+    const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+    const checkHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
 
-    const calculatedHash = crypto.createHmac('sha256', secretKey)
-        .update(dataCheckString)
-        .digest('hex');
-
-    return calculatedHash === hash;
-}
-
-// ------------------------------------------------------------------
-// ⛔️ دالة الحظر الدائم للمستخدم
-// ------------------------------------------------------------------
-/**
- * Logs a ban event and updates the user's status to 'banned'.
- */
-async function permanentlyBanUser(userId, reason) {
-    console.warn(`🚨 Banning User ID ${userId} for: ${reason}`);
-    
-    try {
-        await supabaseFetch('users', 'PATCH', 
-            { status: 'banned', ban_reason: reason, banned_at: new Date().toISOString() }, 
-            `?id=eq.${userId}`);
-        
-        await supabaseFetch('bans_history', 'POST', 
-            { user_id: userId, reason: reason, detected_at: new Date().toISOString() }, 
-            '?select=user_id');
-            
-    } catch(e) {
-        console.error(`Failed to execute permanent ban for user ${userId}:`, e.message);
+    if (checkHash !== hash) {
+        console.warn('Security Check Failed: Hash mismatch.');
+        return false;
     }
-}
 
+    // 4. التحقق من تاريخ الانتهاء (3 ثوانٍ) ⬅️ تطبيق متطلب المستخدم
+    const authDate = parseInt(urlParams.get('auth_date')) * 1000; // تحويل إلى مللي ثانية
+    const currentTime = Date.now();
+    const expirationTime = 3 * 1000; // 3 ثواني فقط!
 
-// ------------------------------------------------------------------
-// ♻️ دالة التحقق من استخدام initData مرة واحدة لكل إجراء (مكافحة هجمات إعادة الإرسال)
-// ------------------------------------------------------------------
-/**
- * Checks if the initData hash was used recently for the specific action and stores it.
- */
-async function checkAndStoreInitDataHash(initDataHash, userId, actionType) {
-    const expirySeconds = 5; // صلاحية التوكن 5 ثوانٍ لمنع الإرسال السريع جداً لنفس الإجراء
-    try {
-        // 1. التحقق من وجود الهاش المستخدم مؤخراً
-        const existingRecord = await supabaseFetch('init_data_cache', 'GET', null, 
-            `?hash=eq.${initDataHash}&action=eq.${actionType}&user_id=eq.${userId}&expires_at=gt.${new Date().toISOString()}&select=hash`);
-
-        if (Array.isArray(existingRecord) && existingRecord.length > 0 && existingRecord[0].hash) {
-            console.warn(`🚫 Replay attack detected for user ${userId}, action ${actionType}, hash ${initDataHash}`);
-            return false; 
-        }
-
-        // 2. تسجيل الهاش الجديد بمدة انتهاء صلاحية
-        const expiryDate = new Date(Date.now() + expirySeconds * 1000).toISOString();
-        await supabaseFetch('init_data_cache', 'POST', {
-            hash: initDataHash,
-            user_id: userId,
-            action: actionType,
-            expires_at: expiryDate 
-        }, '?on_conflict=hash'); 
-
-        return true; 
-    } catch (error) {
-        console.error('InitData cache check failed (allowing request by default):', error.message);
-        return true; 
+    if (currentTime - authDate > expirationTime) {
+        console.warn(`Security Check Failed: Data expired (3s limit exceeded). Auth Date: ${authDate}`);
+        return false;
     }
+
+    return true; // التحقق نجح: البيانات موثوقة وغير منتهية الصلاحية
 }
 
-// --- Helper Functions (sendSuccess, sendError, supabaseFetch remain unchanged) ---
+// --- Helper Functions ---
 
 /**
  * Sends a JSON response with status 200.
+ * @param {Response} res The response object.
+ * @param {Object} data The data to include in the response body.
  */
 function sendSuccess(res, data = {}) {
   res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -139,6 +88,9 @@ function sendSuccess(res, data = {}) {
 
 /**
  * Sends a JSON error response with status 400 or 500.
+ * @param {Response} res The response object.
+ * @param {string} message The error message.
+ * @param {number} statusCode The HTTP status code (default 400).
  */
 function sendError(res, message, statusCode = 400) {
   res.writeHead(statusCode, { 'Content-Type': 'application/json' });
@@ -147,6 +99,11 @@ function sendError(res, message, statusCode = 400) {
 
 /**
  * Executes a fetch request to the Supabase REST API.
+ * @param {string} tableName The name of the Supabase table.
+ * @param {string} method HTTP method (GET, POST, PATCH, DELETE).
+ * @param {Object} body JSON body for POST/PATCH.
+ * @param {string} queryParams URL search parameters (e.g., '?select=*').
+ * @returns {Promise<Object>} The JSON response from Supabase.
  */
 async function supabaseFetch(tableName, method, body = null, queryParams = '?select=*') {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
@@ -170,16 +127,20 @@ async function supabaseFetch(tableName, method, body = null, queryParams = '?sel
 
   const response = await fetch(url, options);
   
+  // Handling success responses (2xx)
   if (response.ok) {
       const responseText = await response.text();
       try {
           const jsonResponse = JSON.parse(responseText);
+          // Supabase often returns an empty array on successful INSERT/UPDATE.
           return jsonResponse.length > 0 ? jsonResponse : { success: true }; 
       } catch (e) {
+          // Handle empty response body (e.g., 204 No Content)
           return { success: true }; 
       }
   }
 
+  // Handling error responses (4xx, 5xx)
   let data;
   try {
       data = await response.json();
@@ -195,237 +156,44 @@ async function supabaseFetch(tableName, method, body = null, queryParams = '?sel
 // --- API Handlers ---
 
 /**
- * 1) type: "register"
- */
-async function handleRegister(req, res, body) {
-  const { user_id, ref_by } = body;
-  const id = parseInt(user_id);
-
-  try {
-    const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=id`);
-
-    if (!Array.isArray(users) || users.length === 0) {
-      const newUser = {
-        id,
-        balance: 0,
-        ads_watched_today: 0,
-        spins_today: 0,
-        ref_by: ref_by ? parseInt(ref_by) : null,
-        status: 'active' 
-      };
-
-      await supabaseFetch('users', 'POST', newUser, '?select=id');
-    }
-
-    sendSuccess(res, { message: 'User registered or already exists.' });
-  } catch (error) {
-    console.error('Registration failed:', error.message);
-    sendError(res, `Registration failed: ${error.message}`, 500);
-  }
-}
-
-/**
- * 2) type: "watchAd"
- * Adds reward to user balance and increments ads_watched_today.
- * 🛡️ تمت إضافة تحقق الحد الأقصى اليومي هنا.
- */
-async function handleWatchAd(req, res, body) {
-  const { user_id } = body;
-  const id = parseInt(user_id);
-  const reward = REWARD_PER_AD; 
-
-  try {
-    // 1. Fetch current user data and check limit
-    const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=balance,ads_watched_today`);
-    if (!Array.isArray(users) || users.length === 0) {
-        return sendError(res, 'User not found.', 404);
-    }
-    
-    const user = users[0];
-    
-    // 🚨 التحقق من الحد الأقصى اليومي (الإصلاح المطلوب)
-    if (user.ads_watched_today >= DAILY_MAX_ADS) {
-        return sendError(res, `Daily ad limit (${DAILY_MAX_ADS}) exceeded.`, 403);
-    }
-    
-    const newBalance = user.balance + reward;
-    const newAdsCount = user.ads_watched_today + 1;
-
-    // 2. Update user record
-    await supabaseFetch('users', 'PATCH', 
-      { balance: newBalance, ads_watched_today: newAdsCount }, 
-      `?id=eq.${id}`);
-
-    // 3. Save to ads_history
-    await supabaseFetch('ads_history', 'POST', 
-      { user_id: id, reward }, 
-      '?select=user_id');
-
-    // 4. Return new state
-    sendSuccess(res, { new_balance: newBalance, new_ads_count: newAdsCount, actual_reward: reward });
-  } catch (error) {
-    console.error('WatchAd failed:', error.message);
-    sendError(res, `WatchAd failed: ${error.message}`, 500);
-  }
-}
-
-/**
- * 3) type: "commission"
- * (Logic remains unchanged)
- */
-async function handleCommission(req, res, body) {
-  const { referrer_id, referee_id } = body; 
-
-  if (!referrer_id || !referee_id) {
-    return sendSuccess(res, { message: 'Invalid commission data received but acknowledged.' });
-  }
-
-  const referrerId = parseInt(referrer_id);
-  const sourceReward = REWARD_PER_AD;
-  const commissionAmount = sourceReward * REFERRAL_COMMISSION_RATE; 
-
-  try {
-    const users = await supabaseFetch('users', 'GET', null, `?id=eq.${referrerId}&select=balance`);
-    if (!Array.isArray(users) || users.length === 0) {
-        return sendSuccess(res, { message: 'Referrer not found, commission aborted.' });
-    }
-    
-    const newBalance = users[0].balance + commissionAmount;
-
-    await supabaseFetch('users', 'PATCH', 
-      { balance: newBalance }, 
-      `?id=eq.${referrerId}`);
-
-    await supabaseFetch('commission_history', 'POST', 
-      { referrer_id: referrerId, referee_id: parseInt(referee_id), amount: commissionAmount, source_reward: sourceReward }, 
-      '?select=referrer_id');
-
-    sendSuccess(res, { new_referrer_balance: newBalance });
-  } catch (error) {
-    console.error('Commission failed:', error.message);
-    sendError(res, `Commission failed: ${error.message}`, 500);
-  }
-}
-
-/**
- * 4) type: "spinAndGetPrize"
- * 🛡️ دمج منطق الدوران: التحقق من الحد، حساب الجائزة، وتحديث الرصيد في طلب واحد.
- */
-async function handleSpinAndGetPrize(req, res, body) {
-  const { user_id } = body; 
-  const id = parseInt(user_id);
-
-  try {
-    // 1. Fetch current user data and check limit
-    const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=balance,spins_today`);
-    if (!Array.isArray(users) || users.length === 0) {
-        return sendError(res, 'User not found.', 404);
-    }
-    
-    const user = users[0];
-    
-    if (user.spins_today >= DAILY_MAX_SPINS) {
-        return sendError(res, `Daily spin limit (${DAILY_MAX_SPINS}) exceeded.`, 403);
-    }
-
-    // 2. Calculate the prize securely
-    const { prize, sectorIndex } = calculateRandomSpinPrize(); 
-    
-    const newBalance = user.balance + prize;
-    const newSpinsCount = user.spins_today + 1;
-
-    // 3. Update user record: balance and spins_today
-    await supabaseFetch('users', 'PATCH', 
-      { balance: newBalance, spins_today: newSpinsCount }, 
-      `?id=eq.${id}`);
-
-    // 4. Save to spin_results
-    await supabaseFetch('spin_results', 'POST', 
-      { user_id: id, prize }, 
-      '?select=user_id');
-
-    // 5. Return prize and sector index for accurate client animation
-    sendSuccess(res, { 
-        new_balance: newBalance, 
-        new_spins_today: newSpinsCount,
-        actual_prize: prize,
-        sector_index: sectorIndex // ⬅️ الإرجاع الجديد للتحكم في العجلة
-    }); 
-
-  } catch (error) {
-    console.error('Spin and Prize failed:', error.message);
-    sendError(res, `Spin and Prize failed: ${error.message}`, 500);
-  }
-}
-
-
-/**
- * 5) type: "withdraw"
- */
-async function handleWithdraw(req, res, body) {
-  const { user_id, binanceId, amount } = body;
-  const id = parseInt(user_id);
-  
-  if (typeof amount !== 'number' || amount <= 0) {
-        return sendError(res, 'Invalid withdrawal amount.', 400);
-  }
-
-  try {
-    const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=balance`);
-    if (!Array.isArray(users) || users.length === 0) {
-        return sendError(res, 'User not found.', 404);
-    }
-
-    const currentBalance = users[0].balance;
-    if (amount < 400) { 
-        return sendError(res, 'Minimum withdrawal is 400 SHIB.', 403);
-    }
-    if (amount > currentBalance) {
-        return sendError(res, 'Insufficient balance.', 403);
-    }
-    
-    const newBalance = currentBalance - amount;
-
-    await supabaseFetch('users', 'PATCH', 
-      { balance: newBalance }, 
-      `?id=eq.${id}`);
-
-    await supabaseFetch('withdrawals', 'POST', {
-      user_id: id,
-      binance_id: binanceId,
-      amount: amount,
-      status: 'Pending',
-    }, '?select=user_id');
-
-    sendSuccess(res, { new_balance: newBalance });
-  } catch (error) {
-    console.error('Withdrawal failed:', error.message);
-    sendError(res, `Withdrawal failed: ${error.message}`, 500);
-  }
-}
-
-/**
- * 6) type: "getUserData"
+ * HANDLER: type: "getUserData"
+ * Fetches the current user data (balance, counts, history, and referrals) for UI initialization.
  */
 async function handleGetUserData(req, res, body) {
-    const { user_id } = body;
-
-    if (!user_id) {
-        return sendError(res, 'Missing user_id for data fetch.');
+    const { user_id, init_data } = body; // ⬅️ استلام init_data
+    
+    if (!user_id || !init_data) {
+        return sendError(res, 'Missing user_id or init_data for data fetch.');
     }
+    
+    // ⬅️ التحقق الأمني
+    if (!validateInitData(init_data)) {
+        return sendError(res, 'Invalid or expired initData. Security check failed.', 401);
+    }
+
     const id = parseInt(user_id);
 
     try {
+        // 1. Fetch user data (balance, ads_watched_today, spins_today)
         const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=balance,ads_watched_today,spins_today`);
         if (!users || users.length === 0 || users.success) {
+            // Return default state if user not found (should be handled by register first)
             return sendSuccess(res, { 
-                balance: 0, ads_watched_today: 0, spins_today: 0, referrals_count: 0, withdrawal_history: []
+                balance: 0, 
+                ads_watched_today: 0, 
+                spins_today: 0,
+                referrals_count: 0,
+                withdrawal_history: []
             });
         }
         
         const userData = users[0];
+
+        // 2. Fetch referrals count
         const referrals = await supabaseFetch('users', 'GET', null, `?ref_by=eq.${id}&select=id`);
         const referralsCount = Array.isArray(referrals) ? referrals.length : 0;
+
+        // 3. Fetch withdrawal history
         const history = await supabaseFetch('withdrawals', 'GET', null, `?user_id=eq.${id}&select=amount,status,created_at&order=created_at.desc`);
         const withdrawalHistory = Array.isArray(history) ? history : [];
 
@@ -442,11 +210,293 @@ async function handleGetUserData(req, res, body) {
 }
 
 
-// --- Main Handler ---
+/**
+ * 1) type: "register"
+ * Creates a new user if they don't exist.
+ */
+async function handleRegister(req, res, body) {
+  const { user_id, ref_by, init_data } = body; // ⬅️ استلام init_data
+  const id = parseInt(user_id);
 
+  // ⬅️ التحقق الأمني
+  if (!validateInitData(init_data)) {
+     return sendError(res, 'Invalid or expired initData. Security check failed.', 401);
+  }
+
+  try {
+    // 1. Check if user exists
+    const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=id`);
+
+    if (!Array.isArray(users) || users.length === 0) {
+      // 2. User does not exist, create new user
+      const newUser = {
+        id,
+        balance: 0,
+        ads_watched_today: 0,
+        spins_today: 0,
+        ref_by: ref_by ? parseInt(ref_by) : null,
+      };
+
+      await supabaseFetch('users', 'POST', newUser, '?select=id');
+    }
+
+    sendSuccess(res, { message: 'User registered or already exists.' });
+  } catch (error) {
+    console.error('Registration failed:', error.message);
+    sendError(res, `Registration failed: ${error.message}`, 500);
+  }
+}
+
+/**
+ * 2) type: "watchAd"
+ * Adds reward to user balance and increments ads_watched_today.
+ * الحماية: تستخدم REWARD_PER_AD من الخادم فقط.
+ */
+async function handleWatchAd(req, res, body) {
+  const { user_id, init_data } = body; // ⬅️ استلام init_data
+  
+  // ⬅️ التحقق الأمني
+  if (!validateInitData(init_data)) {
+     return sendError(res, 'Invalid or expired initData. Security check failed.', 401);
+  }
+
+  const id = parseInt(user_id);
+  const reward = REWARD_PER_AD; 
+
+  try {
+    // 1. Fetch current user data
+    const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=balance,ads_watched_today`);
+    if (!Array.isArray(users) || users.length === 0) {
+        return sendError(res, 'User not found.', 404);
+    }
+    
+    const user = users[0];
+    const newBalance = user.balance + reward;
+    const newAdsCount = user.ads_watched_today + 1;
+
+    // 2. Update user record: balance and ads_watched_today
+    await supabaseFetch('users', 'PATCH', 
+      { balance: newBalance, ads_watched_today: newAdsCount }, 
+      `?id=eq.${id}`);
+
+    // 3. Save to ads_history
+    await supabaseFetch('ads_history', 'POST', 
+      { user_id: id, reward }, 
+      '?select=user_id');
+
+    // 4. Return new state
+    sendSuccess(res, { new_balance: newBalance, new_ads_count: newAdsCount, actual_reward: reward }); 
+  } catch (error) {
+    console.error('WatchAd failed:', error.message);
+    sendError(res, `WatchAd failed: ${error.message}`, 500);
+  }
+}
+
+/**
+ * 3) type: "commission"
+ * Adds commission to referrer balance and logs the event.
+ * الحماية: تحسب قيمة العمولة على الخادم.
+ */
+async function handleCommission(req, res, body) {
+  // لا يتم تطبيق التحقق على 'commission' لأنه قد يتم إرساله بعد اكتمال الإعلان (كطلب ثانوي). 
+  const { referrer_id, referee_id } = body; 
+
+  if (!referrer_id || !referee_id) {
+    return sendSuccess(res, { message: 'Invalid commission data received but acknowledged.' });
+  }
+
+  const referrerId = parseInt(referrer_id);
+  const refereeId = parseInt(referee_id);
+  
+  // حساب العمولة بشكل آمن على الخادم
+  const sourceReward = REWARD_PER_AD;
+  const commissionAmount = sourceReward * REFERRAL_COMMISSION_RATE; 
+
+  try {
+    // 1. Fetch current referrer balance
+    const users = await supabaseFetch('users', 'GET', null, `?id=eq.${referrerId}&select=balance`);
+    if (!Array.isArray(users) || users.length === 0) {
+        // Referrer not found, abort commission gracefully.
+        return sendSuccess(res, { message: 'Referrer not found, commission aborted.' });
+    }
+    
+    const newBalance = users[0].balance + commissionAmount;
+
+    // 2. Update referrer balance
+    await supabaseFetch('users', 'PATCH', 
+      { balance: newBalance }, 
+      `?id=eq.${referrerId}`);
+
+    // 3. Add record to commission_history
+    await supabaseFetch('commission_history', 'POST', 
+      { referrer_id: referrerId, referee_id: refereeId, amount: commissionAmount, source_reward: sourceReward }, 
+      '?select=referrer_id');
+
+    sendSuccess(res, { new_referrer_balance: newBalance });
+  } catch (error) {
+    console.error('Commission failed:', error.message);
+    sendError(res, `Commission failed: ${error.message}`, 500);
+  }
+}
+
+/**
+ * 4) type: "spin"
+ * Increments spins_today and logs the request.
+ */
+async function handleSpin(req, res, body) {
+  const { user_id, init_data } = body; // ⬅️ استلام init_data
+  
+  // ⬅️ التحقق الأمني
+  if (!validateInitData(init_data)) {
+     return sendError(res, 'Invalid or expired initData. Security check failed.', 401);
+  }
+  
+  const id = parseInt(user_id);
+
+  try {
+    // 1. Fetch current user data
+    const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=spins_today`);
+    if (!Array.isArray(users) || users.length === 0) {
+        return sendError(res, 'User not found.', 404);
+    }
+    
+    const newSpinsCount = users[0].spins_today + 1;
+
+    // 2. Update user record: spins_today
+    await supabaseFetch('users', 'PATCH', 
+      { spins_today: newSpinsCount }, 
+      `?id=eq.${id}`);
+
+    // 3. Save to spin_requests
+    await supabaseFetch('spin_requests', 'POST', 
+      { user_id: id }, 
+      '?select=user_id');
+
+    sendSuccess(res, { new_spins_today: newSpinsCount });
+  } catch (error) {
+    console.error('Spin request failed:', error.message);
+    sendError(res, `Spin request failed: ${error.message}`, 500);
+  }
+}
+
+/**
+ * 5) type: "spinResult"
+ * يحسب الجائزة على الخادم، يضيفها إلى رصيد المستخدم، ويسجل النتيجة.
+ * ⬅️ يرسل مؤشر الجائزة للواجهة الأمامية لتصحيح العرض.
+ */
+async function handleSpinResult(req, res, body) {
+  const { user_id, init_data } = body; // ⬅️ استلام init_data
+  
+  // ⬅️ التحقق الأمني
+  if (!validateInitData(init_data)) {
+     return sendError(res, 'Invalid or expired initData. Security check failed.', 401);
+  }
+  
+  const id = parseInt(user_id);
+  
+  // ⬅️ حساب الجائزة والمؤشر بشكل آمن على الخادم
+  const { prize, index: prizeIndex } = calculateRandomSpinPrize(); // ⬅️ تم التعديل
+
+  try {
+    // 1. Fetch current user balance
+    const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=balance`);
+    if (!Array.isArray(users) || users.length === 0) {
+        return sendError(res, 'User not found.', 404);
+    }
+    
+    const newBalance = users[0].balance + prize;
+
+    // 2. Update user record: balance
+    await supabaseFetch('users', 'PATCH', 
+      { balance: newBalance }, 
+      `?id=eq.${id}`);
+
+    // 3. Save to spin_results
+    await supabaseFetch('spin_results', 'POST', 
+      { user_id: id, prize }, 
+      '?select=user_id');
+
+    // 4. إرجاع الجائزة الحقيقية والمؤشر المحسوب في الخادم
+    sendSuccess(res, { new_balance: newBalance, actual_prize: prize, prize_index: prizeIndex }); // ⬅️ تم إرجاع prize_index
+  } catch (error) {
+    console.error('Spin result failed:', error.message);
+    sendError(res, `Spin result failed: ${error.message}`, 500);
+  }
+}
+
+/**
+ * 6) type: "withdraw"
+ * Subtracts amount from user balance and creates a withdrawal record.
+ */
+async function handleWithdraw(req, res, body) {
+  const { user_id, binanceId, amount, init_data } = body; // ⬅️ استلام init_data
+  
+  // ⬅️ التحقق الأمني
+  if (!validateInitData(init_data)) {
+     return sendError(res, 'Invalid or expired initData. Security check failed.', 401);
+  }
+
+  const id = parseInt(user_id);
+  
+  if (typeof amount !== 'number' || amount <= 0) {
+        return sendError(res, 'Invalid withdrawal amount.', 400);
+  }
+  
+  // المنطق الأمني: التحقق من الرصيد والحد الأدنى على الخادم
+
+  try {
+    // 1. Fetch current user balance to ensure sufficient funds
+    const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=balance`);
+    if (!Array.isArray(users) || users.length === 0) {
+        return sendError(res, 'User not found.', 404);
+    }
+
+    const currentBalance = users[0].balance;
+    if (amount < 400) { 
+        return sendError(res, 'Minimum withdrawal is 400 SHIB.', 403);
+    }
+    if (amount > currentBalance) {
+        return sendError(res, 'Insufficient balance.', 403);
+    }
+    
+    const newBalance = currentBalance - amount;
+
+    // 2. Update user record: balance
+    await supabaseFetch('users', 'PATCH', 
+      { balance: newBalance }, 
+      `?id=eq.${id}`);
+
+    // 3. Create record in withdrawals table
+    await supabaseFetch('withdrawals', 'POST', {
+      user_id: id,
+      binance_id: binanceId,
+      amount: amount,
+      status: 'Pending',
+    }, '?select=user_id');
+
+    sendSuccess(res, { new_balance: newBalance });
+  } catch (error) {
+    console.error('Withdrawal failed:', error.message);
+    sendError(res, `Withdrawal failed: ${error.message}`, 500);
+  }
+}
+
+// --- Main Handler for Vercel/Serverless ---
+
+/**
+ * The entry point for the Vercel/Serverless function.
+ * @param {Request} req The incoming request object.
+ * @param {Response} res The outgoing response object.
+ */
 module.exports = async (req, res) => {
-  // CORS configuration (omitted for brevity)
-  // ...
+  // CORS configuration
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    return sendSuccess(res);
+  }
 
   if (req.method !== 'POST') {
     return sendError(res, `Method ${req.method} not allowed. Only POST is supported.`, 405);
@@ -454,7 +504,6 @@ module.exports = async (req, res) => {
 
   let body;
   try {
-    // ... (JSON parsing block - unchanged)
     body = await new Promise((resolve, reject) => {
       let data = '';
       req.on('data', chunk => {
@@ -478,50 +527,8 @@ module.exports = async (req, res) => {
     return sendError(res, 'Missing "type" field in the request body.', 400);
   }
   
-  const { user_id, init_data } = body;
-  
-  if (!user_id && body.type !== 'commission') {
+  if (!body.user_id && body.type !== 'commission') {
       return sendError(res, 'Missing user_id in the request body.', 400);
-  }
-
-  // ------------------------------------------------------------------
-  // 👮‍♂️ نقطة تطبيق الحماية الرئيسية: التحقق من initData و حالة الحظر
-  // ------------------------------------------------------------------
-  
-  const id = parseInt(user_id);
-  const actionType = body.type; 
-
-  if (actionType !== 'commission') { 
-    
-    // 1. التحقق من وجود بيانات التخويل
-    if (!init_data) {
-        console.warn(`🚫 Direct request detected: Missing init_data for type ${actionType} from user ${user_id}`);
-        return sendError(res, 'Authorization data missing. Please ensure you are running the app inside Telegram.', 401);
-    }
-    
-    // 2. التحقق من صحة توقيع Telegram (التحقق الأمني الأهم)
-    if (!verifyTelegramSignature(init_data)) {
-        await permanentlyBanUser(id, `Invalid Telegram initData signature for type ${actionType}`);
-        return sendError(res, 'Authorization failed. Your account has been permanently blocked.', 403);
-    }
-    
-    // 3. التحقق من حالة المستخدم (الحظر)
-    try {
-        const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=status`); 
-        if (Array.isArray(users) && users.length > 0 && users[0].status === 'banned') {
-             return sendError(res, 'Your account is permanently blocked.', 403);
-        }
-    } catch (e) {
-        console.error('Failed to check user status:', e.message);
-    }
-
-    // 4. التحقق من استخدام initData مرة واحدة لكل إجراء (Replay Attack Prevention)
-    if (actionType === 'watchAd' || actionType === 'spinAndGetPrize' || actionType === 'withdraw') { // ⬅️ تم تغيير 'spin' و 'spinResult' إلى 'spinAndGetPrize'
-         const initDataHash = crypto.createHash('sha256').update(init_data).digest('hex');
-         if (!await checkAndStoreInitDataHash(initDataHash, id, actionType)) {
-            return sendError(res, 'Token already used for this action or request is too fast. Please try again.', 429); 
-        }
-    }
   }
 
   // Route the request based on the 'type' field
@@ -538,9 +545,11 @@ module.exports = async (req, res) => {
     case 'commission':
       await handleCommission(req, res, body);
       break;
-    // ⬅️ تم تغيير التوجيه إلى دالة موحدة
-    case 'spinAndGetPrize': 
-      await handleSpinAndGetPrize(req, res, body);
+    case 'spin':
+      await handleSpin(req, res, body);
+      break;
+    case 'spinResult':
+      await handleSpinResult(req, res, body);
       break;
     case 'withdraw':
       await handleWithdraw(req, res, body);
