@@ -1,4 +1,4 @@
-// /api/index.js (النسخة المصححة)
+// /api/index.js (النسخة النهائية والمصححة)
 
 /**
  * SHIB Ads WebApp Backend API
@@ -18,8 +18,8 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 // ------------------------------------------------------------------
 const REWARD_PER_AD = 3; 
 const REFERRAL_COMMISSION_RATE = 0.05;
-const DAILY_MAX_ADS = 100; // ⬅️ إضافة: الحد الأقصى للإعلانات
-const DAILY_MAX_SPINS = 15; // ⬅️ إضافة: الحد الأقصى للدورات
+const DAILY_MAX_ADS = 100; // الحد الأقصى للإعلانات
+const DAILY_MAX_SPINS = 15; // الحد الأقصى للدورات
 // الترتيب: 5 (Index 0), 10 (Index 1), 15 (Index 2), 20 (Index 3), 5 (Index 4)
 const SPIN_SECTORS = [5, 10, 15, 20, 5]; 
 
@@ -29,40 +29,21 @@ const SPIN_SECTORS = [5, 10, 15, 20, 5];
 function calculateRandomSpinPrize() {
     const randomIndex = Math.floor(Math.random() * SPIN_SECTORS.length);
     const prize = SPIN_SECTORS[randomIndex];
-    return { prize, prizeIndex: randomIndex }; // ⬅️ إرجاع الجائزة والمؤشر
+    return { prize, prizeIndex: randomIndex }; 
 }
 
 // --- Helper Functions ---
 
-/**
- * Sends a JSON response with status 200.
- * @param {Response} res The response object.
- * @param {Object} data The data to include in the response body.
- */
 function sendSuccess(res, data = {}) {
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ ok: true, data }));
 }
 
-/**
- * Sends a JSON error response with status 400 or 500.
- * @param {Response} res The response object.
- * @param {string} message The error message.
- * @param {number} statusCode The HTTP status code (default 400).
- */
 function sendError(res, message, statusCode = 400) {
   res.writeHead(statusCode, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ ok: false, error: message }));
 }
 
-/**
- * Executes a fetch request to the Supabase REST API.
- * @param {string} tableName The name of the Supabase table.
- * @param {string} method HTTP method (GET, POST, PATCH, DELETE).
- * @param {Object} body JSON body for POST/PATCH.
- * @param {string} queryParams URL search parameters (e.g., '?select=*').
- * @returns {Promise<Object>} The JSON response from Supabase.
- */
 async function supabaseFetch(tableName, method, body = null, queryParams = '?select=*') {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     throw new Error('Supabase environment variables are not configured.');
@@ -85,20 +66,16 @@ async function supabaseFetch(tableName, method, body = null, queryParams = '?sel
 
   const response = await fetch(url, options);
   
-  // Handling success responses (2xx)
   if (response.ok) {
       const responseText = await response.text();
       try {
           const jsonResponse = JSON.parse(responseText);
-          // Supabase often returns an empty array on successful INSERT/UPDATE.
-          return jsonResponse.length > 0 ? jsonResponse : { success: true }; 
+          return Array.isArray(jsonResponse) ? jsonResponse : { success: true }; 
       } catch (e) {
-          // Handle empty response body (e.g., 204 No Content)
           return { success: true }; 
       }
   }
 
-  // Handling error responses (4xx, 5xx)
   let data;
   try {
       data = await response.json();
@@ -111,13 +88,9 @@ async function supabaseFetch(tableName, method, body = null, queryParams = '?sel
   throw new Error(errorMsg);
 }
 
-
 /**
- * ⬅️ إضافة: دالة التحقق وتصفير العدادات اليومية (Daily Reset Logic)
+ * ⬅️ دالة التحقق وتصفير العدادات اليومية (Daily Reset Logic)
  * تقوم بتصفير عدادات الإعلانات والدورات إذا مر أكثر من 24 ساعة على آخر نشاط.
- * يتم استدعاؤها قبل جلب البيانات الحالية.
- * @param {number} userId
- * @returns {Promise<void>}
  */
 async function resetDailyLimitsIfExpired(userId) {
     const twentyFourHours = 24 * 60 * 60 * 1000;
@@ -125,18 +98,19 @@ async function resetDailyLimitsIfExpired(userId) {
     
     try {
         // 1. Fetch user data with last_activity
+        // ⬇️ تم التأكد من طلب العمود last_activity هنا
         const users = await supabaseFetch('users', 'GET', null, `?id=eq.${userId}&select=ads_watched_today,spins_today,last_activity`);
         if (!Array.isArray(users) || users.length === 0) {
             return;
         }
         
         const user = users[0];
+        // التعامل مع القيمة null في حال كان أول استخدام
         const lastActivity = user.last_activity ? new Date(user.last_activity).getTime() : 0;
         
-        // 2. Check if a reset is needed (more than 24 hours since last activity, or if any count is > 0)
+        // 2. Check if a reset is needed
         if (now - lastActivity > twentyFourHours) {
             
-            // Reset is needed
             const updatePayload = {};
             if (user.ads_watched_today > 0) {
                 updatePayload.ads_watched_today = 0;
@@ -153,67 +127,55 @@ async function resetDailyLimitsIfExpired(userId) {
             }
         }
     } catch (error) {
+        // Logging the error is sufficient
         console.error(`Failed to check/reset daily limits for user ${userId}:`, error.message);
-        // Do not fail the main request, just log the error.
     }
 }
 
 
 // ------------------------------------------------------------------
-// **دالة التحقق الأمني من initData (الحل لمشكلة 401)**
+// **دالة التحقق الأمني من initData**
 // ------------------------------------------------------------------
 function validateInitData(initData) {
-    if (!initData) {
-        console.warn('Security Check Failed: initData is missing.');
-        return false;
-    }
-    if (!BOT_TOKEN) {
-        console.error('BOT_TOKEN is not configured.');
+    if (!initData || !BOT_TOKEN) {
+        console.warn('Security Check Failed: initData or BOT_TOKEN is missing.');
         return false;
     }
     
-    // 1. استخراج الـ 'hash' والبيانات الأخرى
     const urlParams = new URLSearchParams(initData);
     const hash = urlParams.get('hash');
     urlParams.delete('hash');
 
-    // 2. تجميع البيانات للتحقق (حسب الترتيب الأبجدي)
     const dataCheckString = Array.from(urlParams.entries())
         .map(([key, value]) => `${key}=${value}`)
         .sort()
         .join('\n');
 
-    // 3. حساب المفتاح السري (secret key)
     const secretKey = crypto.createHmac('sha256', 'WebAppData')
         .update(BOT_TOKEN)
         .digest();
 
-    // 4. حساب الـ hash المتوقع
     const calculatedHash = crypto.createHmac('sha256', secretKey)
         .update(dataCheckString)
         .digest('hex');
 
-    // 5. مقارنة الـ hash
     if (calculatedHash !== hash) {
-        console.warn(`Security Check Failed: Hash mismatch. Calculated: ${calculatedHash}, Received: ${hash}`);
+        console.warn(`Security Check Failed: Hash mismatch.`);
         return false;
     }
     
-    // 6. التحقق من تاريخ الانتهاء
     const authDateParam = urlParams.get('auth_date');
     if (!authDateParam) {
         console.warn('Security Check Failed: auth_date is missing.');
         return false;
     }
 
-    const authDate = parseInt(authDateParam) * 1000; // تحويل إلى مللي ثانية
+    const authDate = parseInt(authDateParam) * 1000; 
     const currentTime = Date.now();
-    
-    // 1200 ثانية (20 دقيقة) كحد أقصى لانتهاء صلاحية البيانات
-    const expirationTime = 1200 * 1000; 
+    const expirationTime = 1200 * 1000; // 20 minutes limit
 
     if (currentTime - authDate > expirationTime) {
-        console.warn(`Security Check Failed: Data expired (${expirationTime / 1000}s limit exceeded). Auth Date: ${authDate}`);
+        console.warn(`Security Check Failed: Data expired.`);
         return false;
     }
 
@@ -228,37 +190,38 @@ function validateInitData(initData) {
  */
 async function handleGetUserData(req, res, body) {
     const { user_id } = body;
-
     if (!user_id) {
         return sendError(res, 'Missing user_id for data fetch.');
     }
     const id = parseInt(user_id);
 
     try {
-        // ⬅️ إضافة: التحقق من الحدود اليومية وتصفيرها قبل جلب البيانات
+        // ⬅️ 1. تحديث تاريخ آخر نشاط فوراً (لضمان دقة عملية الـ reset)
+        await supabaseFetch('users', 'PATCH', 
+            { last_activity: new Date().toISOString() }, 
+            `?id=eq.${id}&select=id`); 
+            
+        // ⬅️ 2. التحقق من الحدود اليومية وتصفيرها (إذا مر 24 ساعة)
         await resetDailyLimitsIfExpired(id);
 
-        // 1. Fetch user data (balance, ads_watched_today, spins_today)
-        // ⬅️ إضافة: طلب last_activity
+        // 3. Fetch user data (balance, ads_watched_today, spins_today, last_activity)
+        // ⬇️ تم التأكد من طلب العمود last_activity هنا لحل المشكلة
         const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=balance,ads_watched_today,spins_today,last_activity`);
+        
         if (!users || users.length === 0 || users.success) {
             // Return default state if user not found (should be handled by register first)
             return sendSuccess(res, { 
-                balance: 0, 
-                ads_watched_today: 0, 
-                spins_today: 0,
-                referrals_count: 0,
-                withdrawal_history: []
+                balance: 0, ads_watched_today: 0, spins_today: 0, referrals_count: 0, withdrawal_history: []
             });
         }
         
         const userData = users[0];
 
-        // 2. Fetch referrals count
+        // 4. Fetch referrals count
         const referrals = await supabaseFetch('users', 'GET', null, `?ref_by=eq.${id}&select=id`);
         const referralsCount = Array.isArray(referrals) ? referrals.length : 0;
 
-        // 3. Fetch withdrawal history
+        // 5. Fetch withdrawal history
         const history = await supabaseFetch('withdrawals', 'GET', null, `?user_id=eq.${id}&select=amount,status,created_at&order=created_at.desc`);
         const withdrawalHistory = Array.isArray(history) ? history : [];
 
@@ -270,7 +233,8 @@ async function handleGetUserData(req, res, body) {
 
     } catch (error) {
         console.error('GetUserData failed:', error.message);
-        sendError(res, `Failed to retrieve user data: ${error.message}`, 500);
+        // ⬇️ إرجاع رسالة خطأ أكثر وضوحاً للمطور
+        sendError(res, `Failed to retrieve user data: ${error.message}`, 500); 
     }
 }
 
@@ -295,7 +259,7 @@ async function handleRegister(req, res, body) {
         ads_watched_today: 0,
         spins_today: 0,
         ref_by: ref_by ? parseInt(ref_by) : null,
-        last_activity: new Date().toISOString() // ⬅️ إضافة: تحديد أول نشاط
+        last_activity: new Date().toISOString() // ⬅️ إضافة القيمة للعمود الجديد
       };
 
       await supabaseFetch('users', 'POST', newUser, '?select=id');
@@ -311,18 +275,17 @@ async function handleRegister(req, res, body) {
 /**
  * 2) type: "watchAd"
  * Adds reward to user balance and increments ads_watched_today.
- * الحماية: تستخدم REWARD_PER_AD من الخادم فقط.
  */
 async function handleWatchAd(req, res, body) {
   const { user_id } = body;
   const id = parseInt(user_id);
-  const reward = REWARD_PER_AD; // ⬅️ قيمة المكافأة مأخوذة من الخادم (آمنة)
+  const reward = REWARD_PER_AD; 
 
   try {
-    // ⬅️ إضافة: التحقق من الحدود اليومية وتصفيرها قبل البدء
+    // ⬅️ 1. التحقق من الحدود اليومية وتصفيرها قبل البدء
     await resetDailyLimitsIfExpired(id);
 
-    // 1. Fetch current user data
+    // 2. Fetch current user data
     const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=balance,ads_watched_today`);
     if (!Array.isArray(users) || users.length === 0) {
         return sendError(res, 'User not found.', 404);
@@ -330,15 +293,15 @@ async function handleWatchAd(req, res, body) {
     
     const user = users[0];
     
-    // ⬅️ إضافة: التحقق من الحد الأقصى للإعلانات (مهم لمنع الغش)
+    // ⬅️ 3. التحقق من الحد الأقصى للإعلانات (مهم)
     if (user.ads_watched_today >= DAILY_MAX_ADS) {
-        return sendError(res, 'Daily ad limit reached.', 403);
+        return sendError(res, `Daily ad limit (${DAILY_MAX_ADS}) reached.`, 403);
     }
 
     const newBalance = user.balance + reward;
     const newAdsCount = user.ads_watched_today + 1;
     
-    // 2. Update user record: balance, ads_watched_today, and last_activity
+    // 4. Update user record: balance, ads_watched_today, and last_activity
     await supabaseFetch('users', 'PATCH', 
       { 
           balance: newBalance, 
@@ -347,13 +310,13 @@ async function handleWatchAd(req, res, body) {
       }, 
       `?id=eq.${id}`);
 
-    // 3. Save to ads_history
+    // 5. Save to ads_history
     await supabaseFetch('ads_history', 'POST', 
       { user_id: id, reward }, 
       '?select=user_id');
 
-    // 4. Return new state
-    sendSuccess(res, { new_balance: newBalance, new_ads_count: newAdsCount, actual_reward: reward }); // ⬅️ إرجاع المكافأة الحقيقية
+    // 6. Return new state
+    sendSuccess(res, { new_balance: newBalance, new_ads_count: newAdsCount, actual_reward: reward }); 
   } catch (error) {
     console.error('WatchAd failed:', error.message);
     sendError(res, `WatchAd failed: ${error.message}`, 500);
@@ -363,20 +326,16 @@ async function handleWatchAd(req, res, body) {
 /**
  * 3) type: "commission"
  * Adds commission to referrer balance and logs the event.
- * الحماية: تحسب قيمة العمولة على الخادم.
  */
 async function handleCommission(req, res, body) {
   const { referrer_id, referee_id } = body; 
-
   if (!referrer_id || !referee_id) {
-    // لا يعتبر خطأ حرج، يتم إيقاف العملية بهدوء إذا لم تتوفر بيانات الإحالة
     return sendSuccess(res, { message: 'Invalid commission data received but acknowledged.' });
   }
 
   const referrerId = parseInt(referrer_id);
   const refereeId = parseInt(referee_id);
   
-  // ⬅️ حساب العمولة بشكل آمن على الخادم
   const sourceReward = REWARD_PER_AD;
   const commissionAmount = sourceReward * REFERRAL_COMMISSION_RATE; 
 
@@ -384,7 +343,6 @@ async function handleCommission(req, res, body) {
     // 1. Fetch current referrer balance
     const users = await supabaseFetch('users', 'GET', null, `?id=eq.${referrerId}&select=balance`);
     if (!Array.isArray(users) || users.length === 0) {
-        // Referrer not found, abort commission gracefully.
         return sendSuccess(res, { message: 'Referrer not found, commission aborted.' });
     }
     
@@ -408,31 +366,31 @@ async function handleCommission(req, res, body) {
 }
 
 /**
- * 4) type: "spin"
- * Increments spins_today and logs the request.
+ * 4) type: "spin" (يتم استدعاؤها قبل عرض الإعلان)
+ * Increments spins_today ويحجز النتيجة مؤقتاً.
  */
 async function handleSpin(req, res, body) {
   const { user_id } = body;
   const id = parseInt(user_id);
 
   try {
-    // ⬅️ إضافة: التحقق من الحدود اليومية وتصفيرها قبل البدء
+    // ⬅️ 1. التحقق من الحدود اليومية وتصفيرها قبل البدء
     await resetDailyLimitsIfExpired(id);
 
-    // 1. Fetch current user data
+    // 2. Fetch current user data
     const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=spins_today`);
     if (!Array.isArray(users) || users.length === 0) {
         return sendError(res, 'User not found.', 404);
     }
     
-    // ⬅️ إضافة: التحقق من الحد الأقصى للدورات (مهم لمنع الغش)
+    // ⬅️ 3. التحقق من الحد الأقصى للدورات (مهم)
     if (users[0].spins_today >= DAILY_MAX_SPINS) {
-        return sendError(res, 'Daily spin limit reached.', 403);
+        return sendError(res, `Daily spin limit (${DAILY_MAX_SPINS}) reached.`, 403);
     }
     
     const newSpinsCount = users[0].spins_today + 1;
 
-    // 2. Update user record: spins_today, last_activity
+    // 4. Update user record: spins_today, last_activity
     await supabaseFetch('users', 'PATCH', 
       { 
           spins_today: newSpinsCount, 
@@ -440,11 +398,9 @@ async function handleSpin(req, res, body) {
       }, 
       `?id=eq.${id}`);
 
-    // 3. Save to spin_requests
-    await supabaseFetch('spin_requests', 'POST', 
-      { user_id: id }, 
-      '?select=user_id');
-
+    // 5. لا حاجة لتسجيل spin_requests. يتم التسجيل عند استلام النتيجة (spinResult).
+    // نعتمد على زيادة العداد فقط في هذه الخطوة.
+    
     sendSuccess(res, { new_spins_today: newSpinsCount });
   } catch (error) {
     console.error('Spin request failed:', error.message);
@@ -453,9 +409,8 @@ async function handleSpin(req, res, body) {
 }
 
 /**
- * 5) type: "spinResult"
+ * 5) type: "spinResult" (يتم استدعاؤها بعد عرض الإعلان)
  * يحسب الجائزة على الخادم، يضيفها إلى رصيد المستخدم، ويسجل النتيجة.
- * الحماية: تتجاهل أي قيمة 'prize' من العميل.
  */
 async function handleSpinResult(req, res, body) {
   const { user_id } = body; 
@@ -473,7 +428,7 @@ async function handleSpinResult(req, res, body) {
     
     const newBalance = users[0].balance + prize;
 
-    // 2. Update user record: balance
+    // 2. Update user record: balance (last_activity تم تحديثها بالفعل في handleSpin)
     await supabaseFetch('users', 'PATCH', 
       { balance: newBalance }, 
       `?id=eq.${id}`);
@@ -487,7 +442,7 @@ async function handleSpinResult(req, res, body) {
     sendSuccess(res, { 
         new_balance: newBalance, 
         actual_prize: prize, 
-        prize_index: prizeIndex // ⬅️ إضافة مؤشر القطاع لتصحيح العجلة في الواجهة
+        prize_index: prizeIndex 
     }); 
   } catch (error) {
     console.error('Spin result failed:', error.message);
@@ -506,8 +461,6 @@ async function handleWithdraw(req, res, body) {
   if (typeof amount !== 'number' || amount <= 0) {
         return sendError(res, 'Invalid withdrawal amount.', 400);
   }
-  
-  // ⬅️ المنطق الأمني: التحقق من الرصيد والحد الأدنى على الخادم
 
   try {
     // 1. Fetch current user balance to ensure sufficient funds
@@ -517,7 +470,7 @@ async function handleWithdraw(req, res, body) {
     }
 
     const currentBalance = users[0].balance;
-    if (amount < 400) { // الحد الأدنى المكرر هنا للتأكيد
+    if (amount < 400) { 
         return sendError(res, 'Minimum withdrawal is 400 SHIB.', 403);
     }
     if (amount > currentBalance) {
@@ -548,11 +501,6 @@ async function handleWithdraw(req, res, body) {
 
 // --- Main Handler for Vercel/Serverless ---
 
-/**
- * The entry point for the Vercel/Serverless function.
- * @param {Request} req The incoming request object.
- * @param {Response} res The outgoing response object.
- */
 module.exports = async (req, res) => {
   // CORS configuration
   res.setHeader('Access-Control-Allow-Origin', '*');
