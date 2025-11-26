@@ -5,7 +5,7 @@
  * Handles all POST requests from the Telegram Mini App frontend.
  * Uses the Supabase REST API for persistence.
  */
-const crypto = require('crypto'); // ⬅️ إضافة: لاستخدام مكتبة التشفير
+const crypto = require('crypto'); 
 
 // Load environment variables for Supabase connection
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -14,18 +14,22 @@ const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const BOT_TOKEN = process.env.BOT_TOKEN; 
 
 // ------------------------------------------------------------------
-// ثوابت المكافآت المحددة والمؤمنة بالكامل على الخادم (لضمان عدم التلاعب)
+// ثوابت المكافآت والحدود المحددة والمؤمنة بالكامل على الخادم (لضمان عدم التلاعب)
 // ------------------------------------------------------------------
 const REWARD_PER_AD = 3; 
 const REFERRAL_COMMISSION_RATE = 0.05;
+const DAILY_MAX_ADS = 100; // ⬅️ إضافة: الحد الأقصى للإعلانات
+const DAILY_MAX_SPINS = 15; // ⬅️ إضافة: الحد الأقصى للدورات
+// الترتيب: 5 (Index 0), 10 (Index 1), 15 (Index 2), 20 (Index 3), 5 (Index 4)
 const SPIN_SECTORS = [5, 10, 15, 20, 5]; 
 
 /**
- * Helper function to randomly select a prize from the defined sectors.
+ * Helper function to randomly select a prize from the defined sectors and return its index.
  */
 function calculateRandomSpinPrize() {
     const randomIndex = Math.floor(Math.random() * SPIN_SECTORS.length);
-    return SPIN_SECTORS[randomIndex];
+    const prize = SPIN_SECTORS[randomIndex];
+    return { prize, prizeIndex: randomIndex }; // ⬅️ إرجاع الجائزة والمؤشر
 }
 
 // --- Helper Functions ---
@@ -107,6 +111,54 @@ async function supabaseFetch(tableName, method, body = null, queryParams = '?sel
   throw new Error(errorMsg);
 }
 
+
+/**
+ * ⬅️ إضافة: دالة التحقق وتصفير العدادات اليومية (Daily Reset Logic)
+ * تقوم بتصفير عدادات الإعلانات والدورات إذا مر أكثر من 24 ساعة على آخر نشاط.
+ * يتم استدعاؤها قبل جلب البيانات الحالية.
+ * @param {number} userId
+ * @returns {Promise<void>}
+ */
+async function resetDailyLimitsIfExpired(userId) {
+    const twentyFourHours = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    
+    try {
+        // 1. Fetch user data with last_activity
+        const users = await supabaseFetch('users', 'GET', null, `?id=eq.${userId}&select=ads_watched_today,spins_today,last_activity`);
+        if (!Array.isArray(users) || users.length === 0) {
+            return;
+        }
+        
+        const user = users[0];
+        const lastActivity = user.last_activity ? new Date(user.last_activity).getTime() : 0;
+        
+        // 2. Check if a reset is needed (more than 24 hours since last activity, or if any count is > 0)
+        if (now - lastActivity > twentyFourHours) {
+            
+            // Reset is needed
+            const updatePayload = {};
+            if (user.ads_watched_today > 0) {
+                updatePayload.ads_watched_today = 0;
+            }
+            if (user.spins_today > 0) {
+                updatePayload.spins_today = 0;
+            }
+            
+            if (Object.keys(updatePayload).length > 0) {
+                console.log(`Resetting limits for user ${userId}.`);
+                await supabaseFetch('users', 'PATCH', 
+                    updatePayload, 
+                    `?id=eq.${userId}`);
+            }
+        }
+    } catch (error) {
+        console.error(`Failed to check/reset daily limits for user ${userId}:`, error.message);
+        // Do not fail the main request, just log the error.
+    }
+}
+
+
 // ------------------------------------------------------------------
 // **دالة التحقق الأمني من initData (الحل لمشكلة 401)**
 // ------------------------------------------------------------------
@@ -147,7 +199,7 @@ function validateInitData(initData) {
         return false;
     }
     
-    // 6. التحقق من تاريخ الانتهاء (تطبيق الحل)
+    // 6. التحقق من تاريخ الانتهاء
     const authDateParam = urlParams.get('auth_date');
     if (!authDateParam) {
         console.warn('Security Check Failed: auth_date is missing.');
@@ -157,7 +209,7 @@ function validateInitData(initData) {
     const authDate = parseInt(authDateParam) * 1000; // تحويل إلى مللي ثانية
     const currentTime = Date.now();
     
-    // ⬇️ تم التعديل إلى 60 ثانية (60 * 1000 مللي ثانية)
+    // 1200 ثانية (20 دقيقة) كحد أقصى لانتهاء صلاحية البيانات
     const expirationTime = 1200 * 1000; 
 
     if (currentTime - authDate > expirationTime) {
@@ -183,8 +235,12 @@ async function handleGetUserData(req, res, body) {
     const id = parseInt(user_id);
 
     try {
+        // ⬅️ إضافة: التحقق من الحدود اليومية وتصفيرها قبل جلب البيانات
+        await resetDailyLimitsIfExpired(id);
+
         // 1. Fetch user data (balance, ads_watched_today, spins_today)
-        const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=balance,ads_watched_today,spins_today`);
+        // ⬅️ إضافة: طلب last_activity
+        const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=balance,ads_watched_today,spins_today,last_activity`);
         if (!users || users.length === 0 || users.success) {
             // Return default state if user not found (should be handled by register first)
             return sendSuccess(res, { 
@@ -239,6 +295,7 @@ async function handleRegister(req, res, body) {
         ads_watched_today: 0,
         spins_today: 0,
         ref_by: ref_by ? parseInt(ref_by) : null,
+        last_activity: new Date().toISOString() // ⬅️ إضافة: تحديد أول نشاط
       };
 
       await supabaseFetch('users', 'POST', newUser, '?select=id');
@@ -262,6 +319,9 @@ async function handleWatchAd(req, res, body) {
   const reward = REWARD_PER_AD; // ⬅️ قيمة المكافأة مأخوذة من الخادم (آمنة)
 
   try {
+    // ⬅️ إضافة: التحقق من الحدود اليومية وتصفيرها قبل البدء
+    await resetDailyLimitsIfExpired(id);
+
     // 1. Fetch current user data
     const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=balance,ads_watched_today`);
     if (!Array.isArray(users) || users.length === 0) {
@@ -269,12 +329,22 @@ async function handleWatchAd(req, res, body) {
     }
     
     const user = users[0];
+    
+    // ⬅️ إضافة: التحقق من الحد الأقصى للإعلانات (مهم لمنع الغش)
+    if (user.ads_watched_today >= DAILY_MAX_ADS) {
+        return sendError(res, 'Daily ad limit reached.', 403);
+    }
+
     const newBalance = user.balance + reward;
     const newAdsCount = user.ads_watched_today + 1;
-
-    // 2. Update user record: balance and ads_watched_today
+    
+    // 2. Update user record: balance, ads_watched_today, and last_activity
     await supabaseFetch('users', 'PATCH', 
-      { balance: newBalance, ads_watched_today: newAdsCount }, 
+      { 
+          balance: newBalance, 
+          ads_watched_today: newAdsCount, 
+          last_activity: new Date().toISOString() // ⬅️ تحديث النشاط
+      }, 
       `?id=eq.${id}`);
 
     // 3. Save to ads_history
@@ -296,7 +366,7 @@ async function handleWatchAd(req, res, body) {
  * الحماية: تحسب قيمة العمولة على الخادم.
  */
 async function handleCommission(req, res, body) {
-  const { referrer_id, referee_id } = body; // ⬅️ تم إزالة 'amount' و 'source_reward' من مدخلات العميل
+  const { referrer_id, referee_id } = body; 
 
   if (!referrer_id || !referee_id) {
     // لا يعتبر خطأ حرج، يتم إيقاف العملية بهدوء إذا لم تتوفر بيانات الإحالة
@@ -346,17 +416,28 @@ async function handleSpin(req, res, body) {
   const id = parseInt(user_id);
 
   try {
+    // ⬅️ إضافة: التحقق من الحدود اليومية وتصفيرها قبل البدء
+    await resetDailyLimitsIfExpired(id);
+
     // 1. Fetch current user data
     const users = await supabaseFetch('users', 'GET', null, `?id=eq.${id}&select=spins_today`);
     if (!Array.isArray(users) || users.length === 0) {
         return sendError(res, 'User not found.', 404);
     }
     
+    // ⬅️ إضافة: التحقق من الحد الأقصى للدورات (مهم لمنع الغش)
+    if (users[0].spins_today >= DAILY_MAX_SPINS) {
+        return sendError(res, 'Daily spin limit reached.', 403);
+    }
+    
     const newSpinsCount = users[0].spins_today + 1;
 
-    // 2. Update user record: spins_today
+    // 2. Update user record: spins_today, last_activity
     await supabaseFetch('users', 'PATCH', 
-      { spins_today: newSpinsCount }, 
+      { 
+          spins_today: newSpinsCount, 
+          last_activity: new Date().toISOString() // ⬅️ تحديث النشاط
+      }, 
       `?id=eq.${id}`);
 
     // 3. Save to spin_requests
@@ -380,8 +461,8 @@ async function handleSpinResult(req, res, body) {
   const { user_id } = body; 
   const id = parseInt(user_id);
   
-  // ⬅️ حساب الجائزة بشكل آمن على الخادم
-  const prize = calculateRandomSpinPrize(); 
+  // ⬅️ حساب الجائزة والمؤشر بشكل آمن على الخادم
+  const { prize, prizeIndex } = calculateRandomSpinPrize(); 
 
   try {
     // 1. Fetch current user balance
@@ -402,8 +483,12 @@ async function handleSpinResult(req, res, body) {
       { user_id: id, prize }, 
       '?select=user_id');
 
-    // 4. إرجاع الجائزة الحقيقية المحسوبة في الخادم
-    sendSuccess(res, { new_balance: newBalance, actual_prize: prize }); 
+    // 4. إرجاع الجائزة والمؤشر الحقيقي المحسوب في الخادم
+    sendSuccess(res, { 
+        new_balance: newBalance, 
+        actual_prize: prize, 
+        prize_index: prizeIndex // ⬅️ إضافة مؤشر القطاع لتصحيح العجلة في الواجهة
+    }); 
   } catch (error) {
     console.error('Spin result failed:', error.message);
     sendError(res, `Spin result failed: ${error.message}`, 500);
