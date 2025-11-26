@@ -804,6 +804,8 @@ You will earn 5% of the revenue from every referral you bring through ads!
                 ctx.closePath();
                 ctx.stroke();
 
+                // ⬅️ MODIFICATION: Removed text drawing logic as requested to make sectors empty.
+                /*
                 ctx.save();
                 ctx.fillStyle = '#111'; 
                 ctx.font = 'bold 20px Arial';
@@ -817,6 +819,7 @@ You will earn 5% of the revenue from every referral you bring through ads!
                 ctx.textAlign = 'center';
                 ctx.fillText(val + ' SHIB', radius * 0.65, 5); 
                 ctx.restore();
+                */
             });
 
             ctx.beginPath();
@@ -881,16 +884,6 @@ You will earn 5% of the revenue from every referral you bring through ads!
                         
                         const sectorCount = sectors.length; 
                         const arc = 2 * Math.PI / sectorCount; // حجم القطاع بالراديان
-                        
-                        // زاوية مركز القطاع المستهدف:
-                        // (i * arc) هي زاوية بداية القطاع بالنسبة للزاوية العلوية 3*PI/2 (التي هي 0 في الكود أعلاه)
-                        // (arc / 2) هي منتصف القطاع
-                        // 1.5 * Math.PI هي الزاوية العلوية
-                        const sectorCenterAngle = prizeIndex * arc + arc / 2;
-                        
-                        // الزاوية المطلوبة لوضع مركز القطاع بالضبط تحت السهم (الذي يقع عند 3*PI/2 أو -PI/2)
-                        // يجب أن يكون مركز القطاع عند 3*PI/2 (أو -PI/2) ليكون تحت السهم
-                        // بما أن العجلة تدور مع عقارب الساعة، نستخدم الفرق بين مركز القطاع والزاوية العلوية (3*PI/2).
                         
                         // الزاوية المستهدفة بعد الدوران يجب أن تكون 1.5 * PI (270 درجة)
                         const targetRotationAngle = 1.5 * Math.PI; 
